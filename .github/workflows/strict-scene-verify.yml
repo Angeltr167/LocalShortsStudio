@@ -49,7 +49,10 @@ jobs:
           )
 
       - name: Apply deterministic patch
-        run: python .github/scripts/apply_strict_scene_patch.py
+        run: |
+          python .github/scripts/apply_strict_scene_patch.py
+          python .github/scripts/apply_strict_scene_safety_patch.py
+          python .github/scripts/add_strict_scene_i18n.py
 
       - name: Restore config documentation
         shell: python
@@ -101,6 +104,7 @@ jobs:
           test/services/test_material.py
           test/services/test_task.py
           test/services/test_schema.py
+          test/services/test_webui_i18n.py
 
       - name: Run full test suite
         run: uv run --no-sync python -X utf8 -m pytest -q test
@@ -110,7 +114,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add app/models/schema.py app/services/material.py app/services/task.py \
-            webui/Main.py webui/i18n/en.json webui/i18n/es.json config.example.toml
+            webui/Main.py webui/i18n/*.json config.example.toml
           git diff --cached --check
           git commit -m "feat: add opt-in strict scene matching"
           git push origin feature/strict-scene-matching
