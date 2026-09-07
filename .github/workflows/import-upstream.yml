@@ -1,0 +1,38 @@
+name: Import MoneyPrinterTurbo upstream
+
+on:
+  push:
+    paths:
+      - '.import-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone upstream snapshot
+        run: |
+          git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git /tmp/mpt-upstream
+          rm -rf /tmp/mpt-upstream/.git
+
+      - name: Replace bootstrap tree with upstream snapshot
+        run: |
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          cp -a /tmp/mpt-upstream/. .
+
+      - name: Commit imported snapshot
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m "chore: import MoneyPrinterTurbo upstream snapshot" \
+            -m "Source: https://github.com/harry0703/MoneyPrinterTurbo" \
+            -m "Preserves the upstream MIT license and attribution."
+          git push origin HEAD:main
