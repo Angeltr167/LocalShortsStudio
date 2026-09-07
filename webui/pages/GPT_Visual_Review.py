@@ -81,16 +81,32 @@ if summary["current_video"] and Path(summary["current_video"]).is_file():
 
 st.divider()
 st.subheader("1. Export package for your dedicated ChatGPT review chat")
+scope_options = ["Recommended scenes", "All scenes"]
+if summary["retry_pending_count"]:
+    scope_options.insert(0, "Retry scenes only")
 scope_label = st.radio(
     "Package scope",
-    ["Recommended scenes", "All scenes"],
+    scope_options,
     horizontal=True,
     help=(
         "Recommended scenes uses score margin, low-confidence, reuse and bridge signals. "
         "All scenes is useful for a full audit."
     ),
 )
-scope = "recommended" if scope_label == "Recommended scenes" else "all"
+scope = (
+    "retry"
+    if scope_label == "Retry scenes only"
+    else "recommended"
+    if scope_label == "Recommended scenes"
+    else "all"
+)
+
+if summary.get("retry_exhausted_count"):
+    st.warning(
+        f"{summary['retry_exhausted_count']} retry scene(s) reached the hard limit of "
+        f"{summary['max_retry_rounds']} searches. The next GPT review must KEEP or SELECT; "
+        "another RETRY_SEARCH will be rejected."
+    )
 
 if st.button(
     "Build GPT Review Package",

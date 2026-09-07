@@ -44,6 +44,7 @@ MAX_RETRY_QUERY_CHARS = 180
 MAX_RETRY_QUERY_WORDS = 24
 MAX_AVOID_ITEMS = 8
 MAX_AVOID_CHARS = 120
+MAX_RETRY_ROUNDS = 3
 _REVIEW_MARGIN_THRESHOLD = 0.045
 _REVIEW_SCORE_THRESHOLD = 0.22
 _ALLOWED_ACTIONS = frozenset({"keep", "select", "retry_search"})
@@ -523,6 +524,9 @@ def _manifest_scene(scene: dict[str, Any], *, included: bool) -> dict[str, Any]:
         "visual_intent": str(scene.get("visual_intent") or ""),
         "semantic_query": str(scene.get("semantic_query") or ""),
         "current_candidate_id": str(scene.get("current_candidate_id") or ""),
+        "retry_round": int(scene.get("retry_round") or 0),
+        "max_retry_rounds": MAX_RETRY_ROUNDS,
+        "retry_exhausted": int(scene.get("retry_round") or 0) >= MAX_RETRY_ROUNDS,
         "review_required": bool(scene.get("review_required")),
         "review_reasons": list(scene.get("review_reasons") or []),
         "included_in_package": bool(included),
@@ -544,7 +548,7 @@ def _read_script_data(task_id: str) -> dict[str, Any]:
 
 
 def _review_readme() -> str:
-    return """LocalShortsStudio GPT Visual Review Package\n\nThis package is intentionally offline/manual: it does not call the OpenAI API.\nUse the dedicated ChatGPT visual-director chat established for this project.\n\nReview current_video.mp4, review_manifest.json, and every included scene contact sheet.\nReturn decisions ONLY for scenes where included_in_package=true. Scenes with\nincluded_in_package=false are explicitly outside this review round.\n\nAllowed actions: keep, select, retry_search. Never invent candidate IDs. For\nretry_search, describe visible stock-footage content and list misleading visuals in avoid.\nReturn one valid JSON object with schema_version=1 and the exact task_id.\n"""
+    return """LocalShortsStudio GPT Visual Review Package\n\nThis package is intentionally offline/manual: it does not call the OpenAI API.\nUse the dedicated ChatGPT visual-director chat established for this project.\n\nReview current_video.mp4, review_manifest.json, and every included scene contact sheet.\nReturn decisions ONLY for scenes where included_in_package=true. Scenes with\nincluded_in_package=false are explicitly outside this review round.\n\nAllowed actions: keep, select, retry_search. Never invent candidate IDs. For\nretry_search, describe visible stock-footage content and list misleading visuals in avoid.\n\nRETRY LIMIT: each scene can request at most 3 retry searches. The manifest includes\nretry_round, max_retry_rounds, and retry_exhausted. If retry_exhausted=true,\nRETRY_SEARCH IS FORBIDDEN: choose KEEP when current_candidate_id is available, otherwise\nSELECT the best supplied candidate. Do not keep asking for a perfect literal stock clip\nwhen the provider cannot supply one; prefer the clearest understandable fallback.\n\nReturn one valid JSON object with schema_version=1 and the exact task_id.\n"""
 
 
 def export_review_package(task_id: str, scope: str = "recommended") -> dict[str, Any]:
@@ -682,6 +686,11 @@ def validate_decisions(task_id: str, payload: dict[str, Any]) -> list[dict[str, 
         if confidence is None or confidence < 0 or confidence > 1:
             raise VisualReviewError(f"scene {scene_number} confidence must be between 0 and 1")
         scene = scene_map[scene_number]
+        if action == "retry_search" and int(scene.get("retry_round") or 0) >= MAX_RETRY_ROUNDS:
+            raise VisualReviewError(
+                f"scene {scene_number} exhausted its {MAX_RETRY_ROUNDS} retry searches; "
+                "choose KEEP or SELECT from the supplied candidates"
+            )
         candidate_ids = {
             str(candidate.get("candidate_id") or "") for candidate in scene.get("candidates", [])
         }
@@ -824,26 +833,69 @@ def _refresh_retry_scene(
         extra_negative_queries=avoid,
     )
     retry_round = int(scene.get("retry_round") or 0) + 1
-    candidates = [
+    if retry_round > MAX_RETRY_ROUNDS:
+        raise VisualReviewError(
+            f"scene {scene.get('scene')} exhausted its {MAX_RETRY_ROUNDS} retry searches"
+        )
+
+    existing_candidates = list(scene.get("candidates") or [])
+    current_candidate_id = str(scene.get("current_candidate_id") or "")
+    current_candidate = next(
+        (
+            candidate
+            for candidate in existing_candidates
+            if str(candidate.get("candidate_id") or "") == current_candidate_id
+        ),
+        None,
+    )
+    new_candidates = [
         _candidate_payload(
             f"S{int(scene.get('scene') or 0):02d}-R{retry_round}-C{index}",
             item,
         )
         for index, item in enumerate(ranked[:MAX_REVIEW_CANDIDATES], start=1)
     ]
-    if not candidates:
+    if not new_candidates:
         raise VisualReviewError(f"retry ranking produced no candidates for scene {scene.get('scene')}")
+
+    # Never throw away the visual currently used by the rendered video.  Keeping it in
+    # the next candidate set lets ChatGPT fall back to KEEP when a retry search is worse.
+    candidates: list[dict[str, Any]] = []
+    seen_assets: set[tuple[str, str, str]] = set()
+    if current_candidate is not None:
+        candidates.append(current_candidate)
+        seen_assets.add(
+            (
+                str(current_candidate.get("provider") or ""),
+                str(current_candidate.get("asset_id") or ""),
+                str(current_candidate.get("download_url") or ""),
+            )
+        )
+    for candidate in new_candidates:
+        identity = (
+            str(candidate.get("provider") or ""),
+            str(candidate.get("asset_id") or ""),
+            str(candidate.get("download_url") or ""),
+        )
+        if identity in seen_assets:
+            continue
+        candidates.append(candidate)
+        seen_assets.add(identity)
+        if len(candidates) >= MAX_REVIEW_CANDIDATES:
+            break
+
     scene["candidates"] = candidates
-    # After RETRY_SEARCH there is intentionally no current candidate among the new
-    # options.  The next review round must SELECT one; KEEP is therefore invalid until
-    # a new current candidate is established.
-    scene["current_candidate_id"] = ""
     scene["retry_round"] = retry_round
     scene["retry_pending"] = True
     scene["retry_query"] = query
     scene["retry_avoid"] = avoid
     scene["review_required"] = True
-    scene["review_reasons"] = ["gpt_requested_retry_search"]
+    scene["retry_exhausted"] = retry_round >= MAX_RETRY_ROUNDS
+    scene["review_reasons"] = [
+        "gpt_retry_limit_reached"
+        if scene["retry_exhausted"]
+        else "gpt_requested_retry_search"
+    ]
 
 
 def _extract_master_audio(source_video: Path, destination: Path) -> None:
@@ -1037,6 +1089,12 @@ def review_summary(task_id: str) -> dict[str, Any]:
         "scene_count": len(scenes),
         "review_required_count": sum(bool(scene.get("review_required")) for scene in scenes),
         "retry_pending_count": sum(bool(scene.get("retry_pending")) for scene in scenes),
+        "retry_exhausted_count": sum(
+            bool(scene.get("retry_pending"))
+            and int(scene.get("retry_round") or 0) >= MAX_RETRY_ROUNDS
+            for scene in scenes
+        ),
+        "max_retry_rounds": MAX_RETRY_ROUNDS,
         "package_revision": int(registry.get("package_revision") or 0),
         "review_revision": int(registry.get("review_revision") or 0),
         "last_package_zip": zip_path if zip_path and Path(zip_path).is_file() else "",
