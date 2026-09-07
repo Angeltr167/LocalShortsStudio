@@ -31,8 +31,40 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Normalize config marker for patch
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("config.example.toml")
+          text = path.read_text(encoding="utf-8")
+          old = (
+              '# API key lists support key rotation. Use straight ASCII double quotes and\n'
+              '# separate multiple keys with commas, for example: ["key-1", "key-2"].\n'
+          )
+          if text.count(old) != 1:
+              raise RuntimeError("unexpected config API-key header")
+          path.write_text(
+              text.replace(old, '# API key lists support key rotation.\n', 1),
+              encoding="utf-8",
+          )
+
       - name: Apply deterministic patch
         run: python .github/scripts/apply_strict_scene_patch.py
+
+      - name: Restore config documentation
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("config.example.toml")
+          text = path.read_text(encoding="utf-8")
+          marker = '# API key lists support key rotation.\n'
+          replacement = (
+              '# API key lists support key rotation. Use straight ASCII double quotes and\n'
+              '# separate multiple keys with commas, for example: ["key-1", "key-2"].\n'
+          )
+          if text.count(marker) != 1:
+              raise RuntimeError("strict scene patch did not preserve config marker")
+          path.write_text(text.replace(marker, replacement, 1), encoding="utf-8")
 
       - name: Inspect patch integrity
         run: |
