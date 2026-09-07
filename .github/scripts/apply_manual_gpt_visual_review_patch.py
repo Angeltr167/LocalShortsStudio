@@ -27,6 +27,11 @@ replace_once(
     "from app.services import gpt_visual_review\n",
     "from app.services import gpt_visual_review  # noqa: E402\n",
 )
+replace_once(
+    "test/services/test_gpt_visual_review.py",
+    "def _write_script(task_dir: Path):\n    params = VideoParams(\n",
+    "def _write_script(task_dir: Path):\n    task_dir.mkdir(parents=True, exist_ok=True)\n    params = VideoParams(\n",
+)
 
 
 # ---------------------------------------------------------------------------
