@@ -26,11 +26,7 @@ RedactError = Callable[..., str]
 
 def normalize_scene_search_terms(search_terms: List[str]) -> list[str]:
     """Return non-empty stock-footage queries while preserving user order."""
-    return [
-        str(term).strip()
-        for term in search_terms
-        if str(term or "").strip()
-    ]
+    return [str(term).strip() for term in search_terms if str(term or "").strip()]
 
 
 def build_scene_plan(
@@ -128,6 +124,10 @@ def download_videos_by_scene_queries(
     The primary query is always exhausted before neighboring queries are considered.
     Duplicate provider assets are skipped while unused candidates exist. Reuse is a
     final fallback so a sparse provider result set does not unnecessarily fail a task.
+
+    When semantic ranking is enabled, provider search results remain cached but their
+    semantic ordering is recomputed for each timeline scene. The ranker receives previews
+    from clips already selected so visually repetitive alternatives can be penalized.
     """
     terms = normalize_scene_search_terms(search_terms)
     scene_plan = build_scene_plan(
@@ -145,29 +145,34 @@ def download_videos_by_scene_queries(
         f"scenes={len(scene_plan)}, queries={len(terms)}"
     )
 
-    candidate_cache: dict[str, List[MaterialInfo]] = {}
+    raw_candidate_cache: dict[str, List[MaterialInfo]] = {}
     used_material_ids: set[str] = set()
     failed_material_ids: set[str] = set()
+    selected_materials: list[MaterialInfo] = []
     video_paths: list[str] = []
     material_sources: list[dict[str, Any]] = []
 
-    def candidates_for(query: str) -> List[MaterialInfo]:
-        if query not in candidate_cache:
-            items = search_videos(
-                search_term=query,
-                minimum_duration=max_clip_duration,
-                video_aspect=video_aspect,
+    def raw_candidates_for(query: str) -> List[MaterialInfo]:
+        if query not in raw_candidate_cache:
+            raw_candidate_cache[query] = list(
+                search_videos(
+                    search_term=query,
+                    minimum_duration=max_clip_duration,
+                    video_aspect=video_aspect,
+                )
             )
-            ranked_items = semantic_ranker.rank_materials(
-                query,
-                list(items),
-                enabled=semantic_scene_ranking,
-            )
-            candidate_cache[query] = ranked_items
             logger.info(
-                f"found {len(candidate_cache[query])} strict candidates for {query!r}"
+                f"found {len(raw_candidate_cache[query])} strict candidates for {query!r}"
             )
-        return candidate_cache[query]
+        return raw_candidate_cache[query]
+
+    def candidates_for(query: str) -> List[MaterialInfo]:
+        return semantic_ranker.rank_materials(
+            query,
+            raw_candidates_for(query),
+            enabled=semantic_scene_ranking,
+            reference_items=selected_materials,
+        )
 
     def try_candidate(
         item: MaterialInfo,
@@ -239,13 +244,12 @@ def download_videos_by_scene_queries(
 
         if selected is None or selected_item is None:
             scene["status"] = "unfilled"
-            logger.warning(
-                f"strict scene {scene['scene']} has no downloadable candidate"
-            )
+            logger.warning(f"strict scene {scene['scene']} has no downloadable candidate")
             continue
 
         saved_path, reused = selected
         video_paths.append(saved_path)
+        selected_materials.append(selected_item)
         source = (
             selected_item.source_info
             if isinstance(selected_item.source_info, dict)
@@ -260,8 +264,14 @@ def download_videos_by_scene_queries(
                 "local_file": Path(saved_path).name,
                 "reused": bool(reused),
                 "semantic_score": source.get("semantic_score"),
+                "semantic_positive_score": source.get("semantic_positive_score"),
+                "semantic_negative_score": source.get("semantic_negative_score"),
+                "semantic_diversity_similarity": source.get(
+                    "semantic_diversity_similarity"
+                ),
                 "semantic_rank": source.get("semantic_rank"),
                 "semantic_ranker_model": source.get("semantic_ranker_model"),
+                "semantic_reference_count": source.get("semantic_reference_count"),
             }
         )
         if reused:
