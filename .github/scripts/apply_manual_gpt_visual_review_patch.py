@@ -10,6 +10,20 @@ def replace_once(path: str, old: str, new: str) -> None:
     target.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
+# New review files are committed before this verification patch. Keep their imports
+# clean in the same deterministic CI commit that integrates the workflow.
+replace_once(
+    "app/services/gpt_visual_review.py",
+    "from typing import Any, Iterable, List\n",
+    "from typing import Any, List\n",
+)
+replace_once(
+    "webui/pages/GPT_Visual_Review.py",
+    "import json\n",
+    "",
+)
+
+
 # ---------------------------------------------------------------------------
 # semantic_ranker.py: allow ChatGPT RETRY_SEARCH to supply explicit anti-concepts.
 # ---------------------------------------------------------------------------
