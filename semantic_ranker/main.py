@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import os
 import threading
+from collections import OrderedDict
 from contextlib import asynccontextmanager, nullcontext
 from urllib.parse import urljoin, urlsplit
 
@@ -22,9 +23,15 @@ DEFAULT_PRETRAINED = "laion2b_s34b_b79k"
 DEFAULT_PORT = 4124
 MAX_CANDIDATES = 20
 MAX_PREVIEWS_PER_CANDIDATE = 4
+MAX_NEGATIVE_QUERIES = 8
+MAX_REFERENCE_PREVIEWS = 12
 DEEP_RERANK_TOP_K = 5
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_REDIRECTS = 3
+EMBEDDING_CACHE_SIZE = 512
+NEGATIVE_WEIGHT = 0.45
+DIVERSITY_WEIGHT = 0.35
+DIVERSITY_THRESHOLD = 0.80
 ALLOWED_PREVIEW_HOST_SUFFIXES = (
     "pexels.com",
     "pixabay.com",
@@ -34,16 +41,51 @@ ALLOWED_PREVIEW_HOST_SUFFIXES = (
 _model_lock = threading.Lock()
 _model_bundle = None
 _model_error = None
+_embedding_cache_lock = threading.Lock()
+_embedding_cache: OrderedDict[str, list[float]] = OrderedDict()
 
 
 class Candidate(BaseModel):
     id: str = Field(min_length=1, max_length=256)
-    preview_urls: list[str] = Field(default_factory=list, max_length=MAX_PREVIEWS_PER_CANDIDATE)
+    preview_urls: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_PREVIEWS_PER_CANDIDATE,
+    )
 
 
 class RankRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
+    negative_queries: list[str] = Field(default_factory=list, max_length=MAX_NEGATIVE_QUERIES)
+    reference_preview_urls: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_REFERENCE_PREVIEWS,
+    )
     candidates: list[Candidate] = Field(min_length=1, max_length=MAX_CANDIDATES)
+
+
+def _float_env(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return min(maximum, max(minimum, value))
+
+
+def _negative_weight() -> float:
+    return _float_env("SEMANTIC_RANKER_NEGATIVE_WEIGHT", NEGATIVE_WEIGHT, 0.0, 2.0)
+
+
+def _diversity_weight() -> float:
+    return _float_env("SEMANTIC_RANKER_DIVERSITY_WEIGHT", DIVERSITY_WEIGHT, 0.0, 2.0)
+
+
+def _diversity_threshold() -> float:
+    return _float_env(
+        "SEMANTIC_RANKER_DIVERSITY_THRESHOLD",
+        DIVERSITY_THRESHOLD,
+        -1.0,
+        1.0,
+    )
 
 
 def _configured_device(torch_module) -> str:
@@ -156,7 +198,7 @@ def _fetch_image(url: str) -> Image.Image:
                 timeout=(5, 20),
                 allow_redirects=False,
                 stream=True,
-                headers={"User-Agent": "LocalShortsStudio-SemanticRanker/1.0"},
+                headers={"User-Agent": "LocalShortsStudio-SemanticRanker/1.1"},
             ) as response:
                 if response.is_redirect or response.is_permanent_redirect:
                     if redirect_index >= MAX_REDIRECTS:
@@ -179,30 +221,100 @@ def _fetch_image(url: str) -> Image.Image:
     raise ValueError("preview could not be fetched")
 
 
-def _score_images(query: str, images: list[Image.Image]) -> list[float]:
+def _autocast_context(bundle):
+    torch = bundle["torch"]
+    if bundle["device"] == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    return nullcontext()
+
+
+def _encode_images(images: list[Image.Image]) -> list[list[float]]:
     if not images:
         return []
     bundle = _load_model()
     torch = bundle["torch"]
     model = bundle["model"]
     preprocess = bundle["preprocess"]
-    tokenizer = bundle["tokenizer"]
     device = bundle["device"]
 
     image_tensor = torch.stack([preprocess(image) for image in images]).to(device)
-    text_tensor = tokenizer([query]).to(device)
-    autocast = (
-        torch.autocast(device_type="cuda", dtype=torch.float16)
-        if device == "cuda"
-        else nullcontext()
-    )
-    with torch.inference_mode(), autocast:
+    with torch.inference_mode(), _autocast_context(bundle):
         image_features = model.encode_image(image_tensor)
-        text_features = model.encode_text(text_tensor)
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+    return image_features.detach().float().cpu().tolist()
+
+
+def _encode_texts(texts: list[str]) -> list[list[float]]:
+    normalized = [str(text or "").strip() for text in texts if str(text or "").strip()]
+    if not normalized:
+        return []
+    bundle = _load_model()
+    torch = bundle["torch"]
+    model = bundle["model"]
+    tokenizer = bundle["tokenizer"]
+    device = bundle["device"]
+
+    text_tensor = tokenizer(normalized).to(device)
+    with torch.inference_mode(), _autocast_context(bundle):
+        text_features = model.encode_text(text_tensor)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-        similarities = image_features @ text_features.T
-    return [float(value) for value in similarities.squeeze(1).detach().cpu().tolist()]
+    return text_features.detach().float().cpu().tolist()
+
+
+def _cache_get(url: str) -> list[float] | None:
+    with _embedding_cache_lock:
+        feature = _embedding_cache.get(url)
+        if feature is None:
+            return None
+        _embedding_cache.move_to_end(url)
+        return feature
+
+
+def _cache_put(url: str, feature: list[float]) -> None:
+    with _embedding_cache_lock:
+        _embedding_cache[url] = feature
+        _embedding_cache.move_to_end(url)
+        while len(_embedding_cache) > EMBEDDING_CACHE_SIZE:
+            _embedding_cache.popitem(last=False)
+
+
+def _image_features_for_urls(urls: list[str]) -> dict[str, list[float]]:
+    """Fetch and encode only cache misses, returning normalized CPU embeddings."""
+    normalized_urls: list[str] = []
+    seen: set[str] = set()
+    for value in urls:
+        url = str(value or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        normalized_urls.append(url)
+
+    result: dict[str, list[float]] = {}
+    missing: list[str] = []
+    for url in normalized_urls:
+        feature = _cache_get(url)
+        if feature is None:
+            missing.append(url)
+        else:
+            result[url] = feature
+
+    images: list[Image.Image] = []
+    fetched_urls: list[str] = []
+    for url in missing:
+        try:
+            images.append(_fetch_image(url))
+            fetched_urls.append(url)
+        except Exception:
+            continue
+
+    for url, feature in zip(fetched_urls, _encode_images(images)):
+        _cache_put(url, feature)
+        result[url] = feature
+    return result
+
+
+def _dot(first: list[float], second: list[float]) -> float:
+    return sum(left * right for left, right in zip(first, second))
 
 
 def _aggregate(scores: list[float]) -> float:
@@ -213,34 +325,118 @@ def _aggregate(scores: list[float]) -> float:
     return sum(strongest) / len(strongest)
 
 
+def _final_score(
+    positive_score: float,
+    negative_score: float,
+    diversity_similarity: float,
+    *,
+    negative_weight: float | None = None,
+    diversity_weight: float | None = None,
+    diversity_threshold: float | None = None,
+) -> float:
+    """Combine scene relevance, anti-concepts, and repetition penalty."""
+    if positive_score <= -1.0:
+        return -1.0
+    neg_weight = _negative_weight() if negative_weight is None else negative_weight
+    div_weight = _diversity_weight() if diversity_weight is None else diversity_weight
+    threshold = (
+        _diversity_threshold() if diversity_threshold is None else diversity_threshold
+    )
+    repetition = max(0.0, diversity_similarity - threshold)
+    return positive_score - (neg_weight * max(0.0, negative_score)) - (
+        div_weight * repetition
+    )
+
+
+def _candidate_metrics(
+    image_features: list[list[float]],
+    positive_feature: list[float],
+    negative_features: list[list[float]],
+    reference_features: list[list[float]],
+) -> dict[str, float]:
+    if not image_features:
+        return {
+            "score": -1.0,
+            "positive_score": -1.0,
+            "negative_score": 0.0,
+            "diversity_similarity": 0.0,
+        }
+
+    positive_scores = [_dot(feature, positive_feature) for feature in image_features]
+    positive_score = _aggregate(positive_scores)
+
+    negative_score = 0.0
+    if negative_features:
+        negative_scores = [
+            max(_dot(feature, negative) for negative in negative_features)
+            for feature in image_features
+        ]
+        negative_score = _aggregate(negative_scores)
+
+    diversity_similarity = 0.0
+    if reference_features:
+        diversity_similarity = max(
+            _dot(feature, reference)
+            for feature in image_features
+            for reference in reference_features
+        )
+
+    return {
+        "score": _final_score(
+            positive_score,
+            negative_score,
+            diversity_similarity,
+        ),
+        "positive_score": positive_score,
+        "negative_score": negative_score,
+        "diversity_similarity": diversity_similarity,
+    }
+
+
 def _rank(request: RankRequest) -> dict:
     bundle = _load_model()
-    per_candidate_scores: dict[str, list[float]] = {
+    positive_features = _encode_texts([request.query])
+    if not positive_features:
+        raise ValueError("query could not be encoded")
+    positive_feature = positive_features[0]
+    negative_features = _encode_texts(request.negative_queries)
+    reference_features = list(
+        _image_features_for_urls(request.reference_preview_urls).values()
+    )
+
+    per_candidate_features: dict[str, list[list[float]]] = {
         candidate.id: [] for candidate in request.candidates
     }
 
-    # Stage 1: score one preview for every candidate so a 20-result provider query
-    # needs only 20 image downloads before we know which candidates deserve deeper work.
-    stage1_images = []
-    stage1_ids = []
+    # Stage 1: one preview for every provider candidate. Cached image embeddings
+    # make repeated scene-by-scene reranking cheap after the first encounter.
+    stage1_urls = [
+        candidate.preview_urls[0]
+        for candidate in request.candidates
+        if candidate.preview_urls
+    ]
+    stage1_feature_map = _image_features_for_urls(stage1_urls)
     for candidate in request.candidates:
         if not candidate.preview_urls:
             continue
-        try:
-            stage1_images.append(_fetch_image(candidate.preview_urls[0]))
-            stage1_ids.append(candidate.id)
-        except Exception:
-            continue
-    stage1_scores = _score_images(request.query, stage1_images)
-    for candidate_id, score in zip(stage1_ids, stage1_scores):
-        per_candidate_scores[candidate_id].append(score)
+        feature = stage1_feature_map.get(candidate.preview_urls[0])
+        if feature is not None:
+            per_candidate_features[candidate.id].append(feature)
 
     top_ids = [
         candidate_id
         for candidate_id, _ in sorted(
             (
-                (candidate_id, _aggregate(scores))
-                for candidate_id, scores in per_candidate_scores.items()
+                (
+                    candidate_id,
+                    _candidate_metrics(
+                        features,
+                        positive_feature,
+                        negative_features,
+                        reference_features,
+                    )["score"],
+                )
+                for candidate_id, features in per_candidate_features.items()
             ),
             key=lambda pair: pair[1],
             reverse=True,
@@ -248,34 +444,53 @@ def _rank(request: RankRequest) -> dict:
     ]
     top_id_set = set(top_ids)
 
-    # Stage 2: use the remaining previews only for the strongest candidates.
-    stage2_images = []
-    stage2_ids = []
+    # Stage 2: inspect extra previews only for the strongest candidates.
+    stage2_urls: list[str] = []
+    for candidate in request.candidates:
+        if candidate.id in top_id_set:
+            stage2_urls.extend(candidate.preview_urls[1:])
+    stage2_feature_map = _image_features_for_urls(stage2_urls)
     for candidate in request.candidates:
         if candidate.id not in top_id_set:
             continue
         for preview_url in candidate.preview_urls[1:]:
-            try:
-                stage2_images.append(_fetch_image(preview_url))
-                stage2_ids.append(candidate.id)
-            except Exception:
-                continue
-    stage2_scores = _score_images(request.query, stage2_images)
-    for candidate_id, score in zip(stage2_ids, stage2_scores):
-        per_candidate_scores[candidate_id].append(score)
+            feature = stage2_feature_map.get(preview_url)
+            if feature is not None:
+                per_candidate_features[candidate.id].append(feature)
 
-    ranked = [
-        {
-            "id": candidate.id,
-            "score": round(_aggregate(per_candidate_scores[candidate.id]), 6),
-            "preview_count": len(per_candidate_scores[candidate.id]),
-        }
-        for candidate in request.candidates
-    ]
+    ranked = []
+    for candidate in request.candidates:
+        metrics = _candidate_metrics(
+            per_candidate_features[candidate.id],
+            positive_feature,
+            negative_features,
+            reference_features,
+        )
+        ranked.append(
+            {
+                "id": candidate.id,
+                "score": round(metrics["score"], 6),
+                "positive_score": round(metrics["positive_score"], 6),
+                "negative_score": round(metrics["negative_score"], 6),
+                "diversity_similarity": round(
+                    metrics["diversity_similarity"],
+                    6,
+                ),
+                "preview_count": len(per_candidate_features[candidate.id]),
+            }
+        )
     ranked.sort(key=lambda row: row["score"], reverse=True)
+
     return {
         "model": f"{bundle['model_name']}/{bundle['pretrained']}",
         "device": bundle["device"],
+        "negative_queries": list(request.negative_queries),
+        "reference_count": len(reference_features),
+        "scoring": {
+            "negative_weight": _negative_weight(),
+            "diversity_weight": _diversity_weight(),
+            "diversity_threshold": _diversity_threshold(),
+        },
         "ranked": ranked,
     }
 
@@ -289,7 +504,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="LocalShortsStudio Semantic Ranker",
-    version="1.0",
+    version="1.1",
     lifespan=lifespan,
 )
 
@@ -297,6 +512,8 @@ app = FastAPI(
 @app.get("/health")
 def health():
     bundle = _model_bundle
+    with _embedding_cache_lock:
+        cache_entries = len(_embedding_cache)
     return {
         "status": "healthy" if bundle is not None else "initializing",
         "model_loaded": bundle is not None,
@@ -304,6 +521,11 @@ def health():
             f"{bundle['model_name']}/{bundle['pretrained']}" if bundle is not None else None
         ),
         "device": bundle.get("device") if bundle is not None else None,
+        "version": "1.1",
+        "negative_weight": _negative_weight(),
+        "diversity_weight": _diversity_weight(),
+        "diversity_threshold": _diversity_threshold(),
+        "embedding_cache_entries": cache_entries,
         "error": _model_error,
     }
 
