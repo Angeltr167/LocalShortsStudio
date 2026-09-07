@@ -171,7 +171,7 @@ def download_videos_by_scene_queries(
             query,
             raw_candidates_for(query),
             enabled=semantic_scene_ranking,
-            reference_items=selected_materials,
+            reference_items=list(selected_materials),
         )
 
     def try_candidate(
