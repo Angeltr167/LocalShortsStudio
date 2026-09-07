@@ -2,7 +2,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.models.schema import MaterialInfo, VideoParams
-from app.services import material, strict_scene
+from app.services import material, strict_scene, task
 
 
 def _item(url: str, asset_id: str, search_term: str) -> MaterialInfo:
@@ -60,11 +60,9 @@ def test_strict_downloader_avoids_duplicate_asset_when_alternative_exists():
             saved_plans.append([dict(scene) for scene in updates["scene_plan"]])
         return True
 
-    with (
-        patch(
-            "app.services.strict_scene.task_artifacts.patch_script_data",
-            side_effect=capture_plan,
-        ),
+    with patch(
+        "app.services.strict_scene.task_artifacts.patch_script_data",
+        side_effect=capture_plan,
     ):
         paths = strict_scene.download_videos_by_scene_queries(
             task_id="strict-test",
@@ -166,3 +164,25 @@ def test_strict_stock_path_is_opt_in():
 
     assert result == ["strict.mp4"]
     strict.assert_called_once()
+
+
+def test_task_strict_scene_matching_is_stock_only():
+    stock_params = VideoParams(
+        video_subject="test",
+        video_source="pexels",
+        strict_scene_matching=True,
+    )
+    ai_params = VideoParams(
+        video_subject="test",
+        video_source="wavespeed",
+        strict_scene_matching=True,
+    )
+    local_params = VideoParams(
+        video_subject="test",
+        video_source="local",
+        strict_scene_matching=True,
+    )
+
+    assert task._strict_scene_matching_enabled(stock_params) is True
+    assert task._strict_scene_matching_enabled(ai_params) is False
+    assert task._strict_scene_matching_enabled(local_params) is False
