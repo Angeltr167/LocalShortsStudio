@@ -31,7 +31,9 @@ jobs:
           enable-cache: true
 
       - name: Apply narration alignment patch
-        run: python .github/scripts/apply_narration_alignment_patch.py
+        run: |
+          python .github/scripts/apply_narration_alignment_patch.py
+          python .github/scripts/fix_narration_alignment_bridge_compat.py
 
       - name: Inspect patch integrity
         run: |
