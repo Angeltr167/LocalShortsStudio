@@ -116,6 +116,9 @@ class VideoParams(BaseModel):
     # Opt-in stock-footage assignment that maps ordered visual queries to
     # clip-sized timeline scenes. Disabled by default for compatibility.
     strict_scene_matching: bool = False
+    # Optional local OpenCLIP reranking of stock preview images. This only
+    # changes candidate ordering inside Strict Scene Matching.
+    semantic_scene_ranking: bool = False
     video_count: int = Field(default=1, ge=1)
 
     video_source: Optional[str] = "pexels"

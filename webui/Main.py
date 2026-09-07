@@ -519,6 +519,9 @@ def _initialize_session_state():
         "strict_scene_matching": bool(
             config.app.get("strict_scene_matching", False)
         ),
+        "semantic_scene_ranking": bool(
+            config.app.get("semantic_scene_ranking", False)
+        ),
         "custom_bgm_file_input": _saved_ui_text("custom_bgm_file"),
         "sonilo_bgm_prompt_input": _saved_ui_text(
             "sonilo_bgm_prompt",
@@ -1354,6 +1357,10 @@ def _apply_restored_params(params):
         params.get("strict_scene_matching", False)
     )
     st.session_state["strict_scene_matching"] = restored_strict_scene_matching
+    st.session_state["semantic_scene_ranking"] = bool(
+        params.get("semantic_scene_ranking", False)
+        and restored_strict_scene_matching
+    )
     st.session_state["match_materials_to_script"] = bool(
         params.get("match_materials_to_script", False)
         or restored_strict_scene_matching
@@ -2308,6 +2315,7 @@ def sync_strict_scene_matching():
         )
         st.session_state["match_materials_to_script"] = True
     else:
+        st.session_state["semantic_scene_ranking"] = False
         previous_match = st.session_state.pop(previous_key, None)
         if previous_match is not None:
             st.session_state["match_materials_to_script"] = bool(previous_match)
@@ -4575,6 +4583,21 @@ def _render_video_settings(panel, params):
             )
             if params.strict_scene_matching:
                 params.match_materials_to_script = True
+            elif st.session_state.get("semantic_scene_ranking", False):
+                st.session_state["semantic_scene_ranking"] = False
+
+            params.semantic_scene_ranking = st.checkbox(
+                tr("Semantic Scene Ranking"),
+                help=tr("Semantic Scene Ranking Help"),
+                key="semantic_scene_ranking",
+                disabled=(
+                    not strict_scene_supported
+                    or not params.strict_scene_matching
+                ),
+            )
+            params.semantic_scene_ranking = bool(
+                params.semantic_scene_ranking and params.strict_scene_matching
+            )
 
             _set_runtime_config(
                 "app",
@@ -4585,6 +4608,11 @@ def _render_video_settings(panel, params):
                 "app",
                 "strict_scene_matching",
                 params.strict_scene_matching,
+            )
+            _set_runtime_config(
+                "app",
+                "semantic_scene_ranking",
+                params.semantic_scene_ranking,
             )
             # Ordered modes derive sequential composition and must not overwrite the
             # normal random/sequential preference while they are active.
@@ -7052,6 +7080,10 @@ def _render_application():
     params = VideoParams(video_subject="")
     params.strict_scene_matching = bool(
         st.session_state.get("strict_scene_matching", False)
+    )
+    params.semantic_scene_ranking = bool(
+        st.session_state.get("semantic_scene_ranking", False)
+        and params.strict_scene_matching
     )
     params.match_materials_to_script = bool(
         st.session_state.get("match_materials_to_script", False)

@@ -404,6 +404,8 @@
     "OFox Vendor Volcengine": "Volcano Engine (Festlandchina)",
     "OFox Vendor Auto": "Auto (Gateway-Lastverteilung)",
     "Strict Scene Matching": "Strikte Szenenzuordnung",
-    "Strict Scene Matching Help": "Behandelt geordnete Stockvideo-Schlüsselwörter als Szenensuchen, weist jeder Timeline-Szene einen Clip zu, vermeidet nach Möglichkeit doppelte Quellen und bewahrt die Erzählreihenfolge. Verfügbar für Pexels, Pixabay und Coverr."
+    "Strict Scene Matching Help": "Behandelt geordnete Stockvideo-Schlüsselwörter als Szenensuchen, weist jeder Timeline-Szene einen Clip zu, vermeidet nach Möglichkeit doppelte Quellen und bewahrt die Erzählreihenfolge. Verfügbar für Pexels, Pixabay und Coverr.",
+    "Semantic Scene Ranking": "Semantische Szenenbewertung",
+    "Semantic Scene Ranking Help": "Bewertet Stockvideo-Vorschaubilder mit dem lokalen OpenCLIP-Ranker gegen jede Szenenanfrage, bevor der Clip heruntergeladen wird. Erfordert die strikte Szenenzuordnung. Ist der lokale Ranker nicht verfügbar, bleibt die Anbieterreihenfolge als sichere Ausweichlösung erhalten."
   }
 }

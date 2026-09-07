@@ -81,6 +81,11 @@ video_source = "pexels"
 # queries; one clip is chosen for each clip-sized narration slot.
 strict_scene_matching = false
 
+# Optional local OpenCLIP reranking for Strict Scene Matching. The service
+# runs separately so its PyTorch environment cannot disturb the main app.
+semantic_scene_ranking = false
+semantic_ranker_base_url = "http://127.0.0.1:4124"
+
 # API key lists support key rotation. Use straight ASCII double quotes and
 # separate multiple keys with commas, for example: ["key-1", "key-2"].
 # Key 必须使用英文半角双引号，多个 Key 使用英文逗号分隔。

@@ -404,6 +404,8 @@
     "OFox Vendor Volcengine": "Volcano Engine (China continental)",
     "OFox Vendor Auto": "Automático (balanceamento do gateway)",
     "Strict Scene Matching": "Correspondência estrita de cenas",
-    "Strict Scene Matching Help": "Trata palavras-chave ordenadas de vídeos de stock como buscas de cena, atribui um clipe a cada cena da linha do tempo, evita fontes duplicadas quando possível e preserva a ordem narrativa. Disponível para Pexels, Pixabay e Coverr."
+    "Strict Scene Matching Help": "Trata palavras-chave ordenadas de vídeos de stock como buscas de cena, atribui um clipe a cada cena da linha do tempo, evita fontes duplicadas quando possível e preserva a ordem narrativa. Disponível para Pexels, Pixabay e Coverr.",
+    "Semantic Scene Ranking": "Ranking semântico de cenas",
+    "Semantic Scene Ranking Help": "Usa o ranker OpenCLIP local para pontuar as prévias dos vídeos de stock em relação a cada consulta de cena antes de baixar o clipe. Requer Correspondência estrita de cenas. Se o ranker local não estiver disponível, a ordem do provedor é mantida como fallback seguro."
   }
 }

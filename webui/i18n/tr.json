@@ -404,6 +404,8 @@
     "OFox Vendor Volcengine": "Volcano Engine (Çin anakarası)",
     "OFox Vendor Auto": "Otomatik (ağ geçidi yük dengeleme)",
     "Strict Scene Matching": "Sıkı Sahne Eşleştirme",
-    "Strict Scene Matching Help": "Sıralı stok video anahtar kelimelerini sahne sorguları olarak kullanır, zaman çizelgesindeki her sahneye bir klip atar, mümkün olduğunda yinelenen kaynaklardan kaçınır ve anlatı sırasını korur. Pexels, Pixabay ve Coverr için kullanılabilir."
+    "Strict Scene Matching Help": "Sıralı stok video anahtar kelimelerini sahne sorguları olarak kullanır, zaman çizelgesindeki her sahneye bir klip atar, mümkün olduğunda yinelenen kaynaklardan kaçınır ve anlatı sırasını korur. Pexels, Pixabay ve Coverr için kullanılabilir.",
+    "Semantic Scene Ranking": "Semantik Sahne Sıralaması",
+    "Semantic Scene Ranking Help": "Klibi indirmeden önce her sahne sorgusuna göre stok video önizlemelerini yerel OpenCLIP sıralayıcısıyla puanlar. Sıkı Sahne Eşleştirme gerektirir. Yerel sıralayıcı kullanılamazsa güvenli geri dönüş olarak sağlayıcı sırası korunur."
   }
 }

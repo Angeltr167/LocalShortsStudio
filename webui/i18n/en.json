@@ -491,6 +491,8 @@
     "OFox Upstream Vendor Help": "Which upstream vendor serves OFox video generation. BytePlus (international) is the default with a consistent content policy; Volcano Engine is the mainland-China vendor; Auto lets the OFox gateway load-balance across vendors.",
     "OFox Vendor BytePlus": "BytePlus (International, default)",
     "OFox Vendor Volcengine": "Volcano Engine (Mainland China)",
-    "OFox Vendor Auto": "Auto (gateway load balancing)"
+    "OFox Vendor Auto": "Auto (gateway load balancing)",
+    "Semantic Scene Ranking": "Semantic Scene Ranking",
+    "Semantic Scene Ranking Help": "Use the local OpenCLIP ranker to score stock-video preview images against each scene query before downloading the clip. Requires Strict Scene Matching. If the local ranker is unavailable, provider order is used as a safe fallback."
   }
 }

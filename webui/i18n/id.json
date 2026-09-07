@@ -404,6 +404,8 @@
     "OFox Vendor Volcengine": "Volcano Engine (Tiongkok daratan)",
     "OFox Vendor Auto": "Otomatis (penyeimbangan gateway)",
     "Strict Scene Matching": "Pencocokan Adegan Ketat",
-    "Strict Scene Matching Help": "Memperlakukan kata kunci video stok yang berurutan sebagai pencarian adegan, menetapkan satu klip per adegan timeline, menghindari sumber duplikat bila memungkinkan, dan mempertahankan urutan narasi. Tersedia untuk Pexels, Pixabay, dan Coverr."
+    "Strict Scene Matching Help": "Memperlakukan kata kunci video stok yang berurutan sebagai pencarian adegan, menetapkan satu klip per adegan timeline, menghindari sumber duplikat bila memungkinkan, dan mempertahankan urutan narasi. Tersedia untuk Pexels, Pixabay, dan Coverr.",
+    "Semantic Scene Ranking": "Peringkat Semantik Adegan",
+    "Semantic Scene Ranking Help": "Menggunakan ranker OpenCLIP lokal untuk menilai gambar pratinjau video stok terhadap setiap kueri adegan sebelum klip diunduh. Memerlukan Pencocokan Adegan Ketat. Jika ranker lokal tidak tersedia, urutan penyedia tetap digunakan sebagai fallback aman."
   }
 }

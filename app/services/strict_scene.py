@@ -15,7 +15,7 @@ from typing import Any, Callable, List
 from loguru import logger
 
 from app.models.schema import MaterialInfo, VideoAspect
-from app.services import task_artifacts
+from app.services import semantic_ranker, task_artifacts
 
 SearchVideos = Callable[..., List[MaterialInfo]]
 SaveVideo = Callable[..., str]
@@ -121,6 +121,7 @@ def download_videos_by_scene_queries(
     audio_duration: float,
     max_clip_duration: int,
     material_directory: str,
+    semantic_scene_ranking: bool = False,
 ) -> List[str]:
     """Download one ordered stock clip per scene slot.
 
@@ -157,7 +158,12 @@ def download_videos_by_scene_queries(
                 minimum_duration=max_clip_duration,
                 video_aspect=video_aspect,
             )
-            candidate_cache[query] = list(items)
+            ranked_items = semantic_ranker.rank_materials(
+                query,
+                list(items),
+                enabled=semantic_scene_ranking,
+            )
+            candidate_cache[query] = ranked_items
             logger.info(
                 f"found {len(candidate_cache[query])} strict candidates for {query!r}"
             )
@@ -253,6 +259,9 @@ def download_videos_by_scene_queries(
                 "asset_id": source.get("asset_id"),
                 "local_file": Path(saved_path).name,
                 "reused": bool(reused),
+                "semantic_score": source.get("semantic_score"),
+                "semantic_rank": source.get("semantic_rank"),
+                "semantic_ranker_model": source.get("semantic_ranker_model"),
             }
         )
         if reused:

@@ -378,6 +378,11 @@ def search_videos_pexels(
                             "width": w,
                             "height": h,
                         },
+                        "preview_images": [
+                            str(picture.get("picture"))
+                            for picture in (v.get("video_pictures") or [])
+                            if isinstance(picture, dict) and picture.get("picture")
+                        ],
                     }
                     video_items.append(item)
                     break
@@ -503,6 +508,11 @@ def search_videos_pixabay(
                             "width": w,
                             "height": video.get("height"),
                         },
+                        "preview_images": (
+                            [str(video.get("thumbnail"))]
+                            if video.get("thumbnail")
+                            else []
+                        ),
                     }
                     video_items.append(item)
                     break
@@ -609,6 +619,11 @@ def search_videos_coverr(
                     "width": v.get("max_width"),
                     "height": v.get("max_height"),
                 },
+                "preview_images": [
+                    str(url)
+                    for url in (v.get("thumbnail"), v.get("poster"))
+                    if url
+                ],
             }
             video_items.append(item)
         return video_items
@@ -1666,6 +1681,7 @@ def download_videos(
     max_clip_duration: int = 5,
     match_script_order: bool = False,
     strict_scene_matching: bool = False,
+    semantic_scene_ranking: bool = False,
 ) -> List[str]:
     provider = "pexels"
     remote_search_videos = search_videos_pexels
@@ -1769,6 +1785,7 @@ def download_videos(
             audio_duration=audio_duration,
             max_clip_duration=max_clip_duration,
             material_directory=material_directory,
+            semantic_scene_ranking=semantic_scene_ranking,
         )
 
     if match_script_order:

@@ -99,6 +99,14 @@ def _strict_scene_matching_enabled(params: VideoParams) -> bool:
     )
 
 
+def _semantic_scene_ranking_enabled(params: VideoParams) -> bool:
+    """Semantic reranking is a sub-mode of strict stock scene matching."""
+    return bool(
+        params.semantic_scene_ranking
+        and _strict_scene_matching_enabled(params)
+    )
+
+
 def _get_video_music_prompt(params: VideoParams) -> str:
     """
     读取当前视频配乐供应商实际使用的提示词。
@@ -752,6 +760,7 @@ def get_video_materials(
                 max_clip_duration=params.video_clip_duration,
                 match_script_order=params.match_materials_to_script,
                 strict_scene_matching=_strict_scene_matching_enabled(params),
+                semantic_scene_ranking=_semantic_scene_ranking_enabled(params),
             )
         except volcengine_seedance.VolcEngineSeedanceError as exc:
             # 未确认状态和已生成但下载失败都对应一个可在方舟控制台恢复的远端

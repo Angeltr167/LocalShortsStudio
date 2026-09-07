@@ -404,6 +404,8 @@
     "OFox Vendor Volcengine": "Volcano Engine (Trung Quốc đại lục)",
     "OFox Vendor Auto": "Tự động (gateway cân bằng tải)",
     "Strict Scene Matching": "Khớp cảnh nghiêm ngặt",
-    "Strict Scene Matching Help": "Dùng các từ khóa video stock theo thứ tự làm truy vấn cảnh, gán một clip cho mỗi cảnh trên timeline, tránh nguồn trùng lặp khi có thể và giữ nguyên thứ tự nội dung. Hỗ trợ Pexels, Pixabay và Coverr."
+    "Strict Scene Matching Help": "Dùng các từ khóa video stock theo thứ tự làm truy vấn cảnh, gán một clip cho mỗi cảnh trên timeline, tránh nguồn trùng lặp khi có thể và giữ nguyên thứ tự nội dung. Hỗ trợ Pexels, Pixabay và Coverr.",
+    "Semantic Scene Ranking": "Xếp hạng ngữ nghĩa cảnh",
+    "Semantic Scene Ranking Help": "Dùng bộ xếp hạng OpenCLIP cục bộ để chấm điểm ảnh xem trước video stock so với từng truy vấn cảnh trước khi tải clip. Yêu cầu Khớp cảnh nghiêm ngặt. Nếu bộ xếp hạng cục bộ không khả dụng, thứ tự của nhà cung cấp được giữ làm phương án dự phòng an toàn."
   }
 }
