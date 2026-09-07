@@ -10,6 +10,7 @@ safe fallback.
 from __future__ import annotations
 
 import math
+import re
 from typing import List
 
 import requests
@@ -137,6 +138,28 @@ def build_negative_queries(query: str) -> list[str]:
             if len(negatives) >= MAX_NEGATIVE_QUERIES:
                 return negatives
     return negatives
+
+
+def build_positive_query(query: str) -> str:
+    """Return a CLIP-positive description with explicit anti-concepts removed.
+
+    CLIP-style retrieval is unreliable when a desired visual is phrased through
+    negation (for example ``no phone``).  The original query is still used to
+    build ``negative_queries``; this function only rewrites the positive side so
+    the service sees what should actually be visible.
+    """
+    text = " ".join(str(query or "").split())
+    if not text:
+        return ""
+
+    substitutions = (
+        (r"\bdo\s+not\s+disturb\b", "phone face down silent notifications"),
+        (r"\bwithout\s+(?:a\s+|the\s+)?phone\b", ""),
+        (r"\bno\s+phone\b", ""),
+    )
+    for pattern, replacement in substitutions:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return " ".join(text.split()).strip(" ,;.-")
 
 
 def reference_preview_urls(items: List[MaterialInfo]) -> list[str]:
@@ -280,10 +303,11 @@ def rank_materials(
         return ordered
 
     negatives = build_negative_queries(query)
+    positive_query = build_positive_query(query) or str(query or "").strip()
     references = reference_preview_urls(reference_items or [])
     base_url = _base_url()
     payload = {
-        "query": str(query or "").strip(),
+        "query": positive_query,
         "negative_queries": negatives,
         "reference_preview_urls": references,
         "candidates": payload_candidates,

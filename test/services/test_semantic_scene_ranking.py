@@ -404,3 +404,72 @@ def test_alignment_service_returns_text_similarity_matrix(monkeypatch):
         )
     )
     assert result["scores"] == [[1.0, 0.0], [0.0, 1.0]]
+
+
+
+def test_scene_specific_query_combines_timed_narration_and_visual_anchor():
+    query = strict_scene._build_scene_specific_query(
+        "Then sit down and finish the report at your laptop before checking messages.",
+        "focused person deep work laptop no phone",
+    )
+    assert query.startswith("focused person deep work laptop")
+    assert "report" in query
+    assert "phone" not in query
+    assert " no " not in f" {query} "
+    assert len(query.split()) <= strict_scene._PROVIDER_QUERY_MAX_WORDS
+
+
+def test_provider_rrf_rewards_candidate_returned_by_multiple_scene_phrasings():
+    repeated = _item("repeated", "https://images.pexels.com/repeated.jpg")
+    specific_only = _item("specific-only", "https://images.pexels.com/specific.jpg")
+    anchor_only = _item("anchor-only", "https://images.pexels.com/anchor.jpg")
+
+    fused = strict_scene._fuse_provider_rankings(
+        [
+            ("specific", 1.0, [specific_only, repeated]),
+            ("anchor", 1.0, [anchor_only, repeated]),
+        ]
+    )
+
+    assert fused[0].source_info["asset_id"] == "repeated"
+    assert fused[0].source_info["provider_query_hits"] == 2
+    assert fused[0].source_info["provider_fusion_score"] > fused[1].source_info["provider_fusion_score"]
+
+
+def test_rank_materials_moves_no_phone_constraint_to_negative_side():
+    first = _item("first-positive", "https://images.pexels.com/first-positive.jpg")
+    second = _item("second-positive", "https://images.pexels.com/second-positive.jpg")
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "model": "ViT-B-32/test",
+        "ranked": [
+            {"id": "pexels:first-positive", "score": 0.5},
+            {"id": "pexels:second-positive", "score": 0.4},
+        ],
+    }
+    session = Mock()
+    session.post.return_value = response
+
+    with patch("app.services.semantic_ranker._local_session", return_value=session):
+        semantic_ranker.rank_materials(
+            "calm focused person deep work laptop no phone",
+            [first, second],
+            enabled=True,
+        )
+
+    payload = session.post.call_args.kwargs["json"]
+    assert "no phone" not in payload["query"].lower()
+    assert "focused person" in payload["query"].lower()
+    assert "person holding a smartphone" in payload["negative_queries"]
+
+
+def test_scene_query_specs_keep_specific_rewrite_and_original_anchor():
+    specs = strict_scene._query_specs_for_scene(
+        "a half-written email is still waiting to be finished",
+        "half written email on laptop screen office",
+    )
+    assert specs[0][2] == "scene_specific"
+    assert specs[-1][2] == "anchor"
+    assert specs[0][0] != specs[-1][0]
+    assert "finished" in specs[0][0]

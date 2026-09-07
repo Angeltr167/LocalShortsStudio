@@ -309,6 +309,172 @@ def _apply_narration_alignment(
     return True
 
 
+_SCENE_QUERY_RRF_K = 60.0
+_SCENE_SPECIFIC_WEIGHT = 1.15
+_ANCHOR_QUERY_WEIGHT = 1.0
+_BRIDGE_NEIGHBOR_WEIGHT = 0.85
+_PROVIDER_QUERY_MAX_WORDS = 18
+_PROVIDER_QUERY_MAX_CHARS = 160
+_SEMANTIC_QUERY_MAX_WORDS = 30
+_PROVIDER_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?")
+_PROVIDER_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "been", "being", "but",
+        "by", "can", "could", "did", "do", "does", "for", "from", "had",
+        "has", "have", "he", "her", "hers", "him", "his", "how", "i", "if",
+        "in", "into", "is", "it", "its", "may", "might", "of", "on", "or",
+        "our", "ours", "she", "so", "some", "something", "that", "the",
+        "their", "theirs", "them", "then", "there", "these", "they", "this",
+        "those", "through", "to", "too", "up", "us", "was", "we", "were",
+        "what", "when", "where", "which", "while", "who", "why", "will",
+        "with", "would", "you", "your", "yours",
+    }
+)
+
+
+def _provider_safe_text(value: str) -> str:
+    """Remove provider-hostile negation while preserving a positive visual cue."""
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    text = re.sub(
+        r"\bdo\s+not\s+disturb\b",
+        "phone face down silent notifications",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Dropping the whole negated phone phrase is intentional.  Keeping only the
+    # noun would turn "no phone" into a provider search for "phone".
+    text = re.sub(
+        r"\bwithout\s+(?:a\s+|the\s+)?phone\b|\bno\s+phone\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return " ".join(text.split())
+
+
+def _provider_query_words(value: str) -> list[str]:
+    words: list[str] = []
+    seen: set[str] = set()
+    for raw in _PROVIDER_TOKEN_RE.findall(_provider_safe_text(value).lower()):
+        word = raw.strip("'-")
+        if not word or word in _PROVIDER_STOPWORDS or word in seen:
+            continue
+        seen.add(word)
+        words.append(word)
+    return words
+
+
+def _bounded_query(words: list[str]) -> str:
+    selected: list[str] = []
+    for word in words:
+        if len(selected) >= _PROVIDER_QUERY_MAX_WORDS:
+            break
+        candidate = " ".join(selected + [word])
+        if len(candidate) > _PROVIDER_QUERY_MAX_CHARS:
+            break
+        selected.append(word)
+    return " ".join(selected)
+
+
+def _build_scene_specific_query(narration: str, anchor_query: str) -> str:
+    """Create a short stock-provider query from visual anchor + timed narration.
+
+    The manually supplied anchor stays first because it is already written as a
+    visual intent.  Timed narration contributes only new content words, giving
+    each 3-second scene a more specific search without requiring another LLM.
+    """
+    anchor_words = _provider_query_words(anchor_query)
+    narration_words = _provider_query_words(narration)
+    merged = list(anchor_words)
+    seen = set(anchor_words)
+    for word in narration_words:
+        if word in seen:
+            continue
+        seen.add(word)
+        merged.append(word)
+    return _bounded_query(merged)
+
+
+def _build_semantic_scene_query(narration: str, anchor_query: str) -> str:
+    """Build a bounded natural-language CLIP query for the final preview rerank."""
+    pieces = [
+        " ".join(str(anchor_query or "").split()),
+        " ".join(str(narration or "").split()),
+    ]
+    combined = ". ".join(piece for piece in pieces if piece)
+    words = combined.split()
+    if len(words) > _SEMANTIC_QUERY_MAX_WORDS:
+        combined = " ".join(words[:_SEMANTIC_QUERY_MAX_WORDS])
+    return combined.strip(" ,;.-")
+
+
+def _query_specs_for_scene(
+    narration: str,
+    anchor_query: str,
+) -> list[tuple[str, float, str]]:
+    """Return scene-specific and anchor searches, deduplicated in priority order."""
+    specific = _build_scene_specific_query(narration, anchor_query)
+    specs = [
+        (specific, _SCENE_SPECIFIC_WEIGHT, "scene_specific"),
+        (_provider_safe_text(anchor_query), _ANCHOR_QUERY_WEIGHT, "anchor"),
+    ]
+    output: list[tuple[str, float, str]] = []
+    seen: set[str] = set()
+    for query, weight, kind in specs:
+        normalized = " ".join(str(query or "").split()).strip()
+        key = normalized.lower()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        output.append((normalized, weight, kind))
+    return output
+
+
+def _fuse_provider_rankings(
+    ranked_results: list[tuple[str, float, List[MaterialInfo]]],
+) -> List[MaterialInfo]:
+    """Fuse multiple provider result lists with weighted reciprocal-rank fusion.
+
+    Provider APIs expose useful ordering but not comparable relevance scores.
+    RRF combines those ranks without score normalization and rewards an asset that
+    appears under more than one scene phrasing before OpenCLIP performs the final
+    visual rerank.
+    """
+    scores: dict[str, float] = {}
+    hits: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
+    identity_to_item: dict[str, MaterialInfo] = {}
+    encounter = 0
+
+    for _, weight, items in ranked_results:
+        for rank, item in enumerate(items, start=1):
+            identity = _material_identity(item)
+            if identity not in identity_to_item:
+                identity_to_item[identity] = item
+                first_seen[identity] = encounter
+                encounter += 1
+            scores[identity] = scores.get(identity, 0.0) + (
+                float(weight) / (_SCENE_QUERY_RRF_K + rank)
+            )
+            hits[identity] = hits.get(identity, 0) + 1
+
+    identities = sorted(
+        identity_to_item,
+        key=lambda identity: (-scores[identity], first_seen[identity]),
+    )
+    fused: list[MaterialInfo] = []
+    for identity in identities:
+        item = identity_to_item[identity]
+        source = dict(item.source_info) if isinstance(item.source_info, dict) else {}
+        source["provider_fusion_score"] = round(scores[identity], 8)
+        source["provider_query_hits"] = hits[identity]
+        item.source_info = source
+        fused.append(item)
+    return fused
+
+
 def _fallback_query_indexes(primary_index: int, query_count: int) -> list[int]:
     """Return the primary query followed by the nearest narrative neighbors."""
     order = [primary_index]
@@ -408,25 +574,45 @@ def download_videos_by_scene_queries(
             )
         return raw_candidate_cache[query]
 
-    def merged_raw_candidates(queries: list[str]) -> List[MaterialInfo]:
-        """Merge provider searches while deduplicating alternate renditions/assets."""
+    def fused_raw_candidates(
+        specs: list[tuple[str, float, str]],
+    ) -> List[MaterialInfo]:
+        ranked_results = [
+            (query, weight, raw_candidates_for(query))
+            for query, weight, _ in specs
+        ]
+        return _fuse_provider_rankings(ranked_results)
 
-        merged: list[MaterialInfo] = []
-        seen: set[str] = set()
-        for query in queries:
-            for item in raw_candidates_for(query):
-                identity = _material_identity(item)
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                merged.append(item)
-        return merged
+    def record_scene_queries(
+        scene: dict[str, Any],
+        specs: list[tuple[str, float, str]],
+    ) -> None:
+        existing = scene.setdefault("search_queries", [])
+        known = {str(value.get("query") or "").lower() for value in existing if isinstance(value, dict)}
+        for query, weight, kind in specs:
+            if query.lower() in known:
+                continue
+            existing.append(
+                {"query": query, "weight": round(float(weight), 3), "kind": kind}
+            )
+            known.add(query.lower())
 
-    def candidates_for(query: str) -> List[MaterialInfo]:
+    def candidates_for_scene(
+        scene: dict[str, Any],
+        anchor_query: str,
+    ) -> List[MaterialInfo]:
+        if not semantic_scene_ranking:
+            return raw_candidates_for(anchor_query)
+
+        narration = str(scene.get("narration_text") or "")
+        specs = _query_specs_for_scene(narration, anchor_query)
+        record_scene_queries(scene, specs)
+        semantic_query = _build_semantic_scene_query(narration, anchor_query)
+        scene["semantic_query"] = semantic_query
         return semantic_ranker.rank_materials(
-            query,
-            raw_candidates_for(query),
-            enabled=semantic_scene_ranking,
+            semantic_query,
+            fused_raw_candidates(specs),
+            enabled=True,
             reference_items=list(selected_materials),
         )
 
@@ -484,21 +670,28 @@ def download_videos_by_scene_queries(
                 and 0 <= bridge_to_index < len(terms)
                 and bridge_query
             ):
-                bridge_raw = merged_raw_candidates(
-                    [
-                        bridge_query,
-                        terms[primary_index],
-                        terms[bridge_to_index],
-                    ]
-                )
+                narration = str(scene.get("narration_text") or "")
+                bridge_specs = _query_specs_for_scene(narration, bridge_query)
+                existing_bridge_queries = {query.lower() for query, _, _ in bridge_specs}
+                for query, weight, kind in (
+                    (terms[primary_index], _BRIDGE_NEIGHBOR_WEIGHT, "bridge_current"),
+                    (terms[bridge_to_index], _BRIDGE_NEIGHBOR_WEIGHT, "bridge_next"),
+                ):
+                    safe_query = _provider_safe_text(query)
+                    if safe_query and safe_query.lower() not in existing_bridge_queries:
+                        bridge_specs.append((safe_query, weight, kind))
+                        existing_bridge_queries.add(safe_query.lower())
+                record_scene_queries(scene, bridge_specs)
+                bridge_raw = fused_raw_candidates(bridge_specs)
+                semantic_query = _build_semantic_scene_query(narration, bridge_query)
                 bridge_ranked = semantic_ranker.rank_materials(
-                    bridge_query,
+                    semantic_query,
                     bridge_raw,
                     enabled=True,
                     reference_items=list(selected_materials),
                 )
                 scene["semantic_bridge"] = True
-                scene["semantic_query"] = bridge_query
+                scene["semantic_query"] = semantic_query
                 for item in bridge_ranked:
                     result = try_candidate(item, allow_reuse=False)
                     if result is None:
@@ -516,17 +709,21 @@ def download_videos_by_scene_queries(
                     bridge_selected = True
                     break
 
-        # First pass: only unused source assets.
+        # First pass: only unused source assets.  Semantic mode searches a
+        # scene-specific rewrite plus the original anchor and fuses both provider
+        # rankings before OpenCLIP.  Strict-only mode remains byte-for-byte
+        # equivalent in intent: a single anchor query at a time.
         if selected is None:
             for query_index in query_indexes:
                 query = terms[query_index]
-                for item in candidates_for(query):
+                for item in candidates_for_scene(scene, query):
                     result = try_candidate(item, allow_reuse=False)
                     if result is None:
                         continue
                     selected = result
                     selected_item = item
-                    selected_query = query
+                    source = item.source_info if isinstance(item.source_info, dict) else {}
+                    selected_query = str(source.get("search_term") or query)
                     break
                 if selected is not None:
                     break
@@ -554,13 +751,14 @@ def download_videos_by_scene_queries(
         if selected is None:
             for query_index in query_indexes:
                 query = terms[query_index]
-                for item in candidates_for(query):
+                for item in candidates_for_scene(scene, query):
                     result = try_candidate(item, allow_reuse=True)
                     if result is None:
                         continue
                     selected = result
                     selected_item = item
-                    selected_query = query
+                    source = item.source_info if isinstance(item.source_info, dict) else {}
+                    selected_query = str(source.get("search_term") or query)
                     break
                 if selected is not None:
                     break
