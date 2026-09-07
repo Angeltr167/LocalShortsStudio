@@ -20,7 +20,7 @@ import tempfile
 import textwrap
 import zipfile
 from pathlib import Path
-from typing import Any, Iterable, List
+from typing import Any, List
 from urllib.parse import urlsplit
 
 import requests

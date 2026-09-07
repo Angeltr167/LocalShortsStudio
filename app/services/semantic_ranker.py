@@ -271,6 +271,7 @@ def rank_materials(
     *,
     enabled: bool,
     reference_items: List[MaterialInfo] | None = None,
+    extra_negative_queries: list[str] | None = None,
 ) -> List[MaterialInfo]:
     """Rerank stock materials by contrastive semantics and visual diversity.
 
@@ -302,7 +303,17 @@ def rank_materials(
         logger.info("semantic scene ranking skipped: candidates have no preview images")
         return ordered
 
-    negatives = build_negative_queries(query)
+    negatives: list[str] = []
+    # Manual GPT review anti-concepts take precedence over deterministic rules: the
+    # reviewer has inspected the actual failed candidates and can name exactly what
+    # should be avoided (for example "startup screen" or "empty office").
+    for value in list(extra_negative_queries or []) + build_negative_queries(query):
+        normalized = " ".join(str(value or "").split())
+        if not normalized or normalized in negatives:
+            continue
+        negatives.append(normalized)
+        if len(negatives) >= MAX_NEGATIVE_QUERIES:
+            break
     positive_query = build_positive_query(query) or str(query or "").strip()
     references = reference_preview_urls(reference_items or [])
     base_url = _base_url()

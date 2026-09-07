@@ -39,6 +39,7 @@ def _item(asset_id: str, score: float, url_suffix: str = "") -> MaterialInfo:
 
 
 def _write_script(task_dir: Path):
+    task_dir.mkdir(parents=True, exist_ok=True)
     params = VideoParams(
         video_subject="unfinished work",
         video_source="pexels",

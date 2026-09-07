@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -12,7 +11,7 @@ if root_dir in sys.path:
     sys.path.remove(root_dir)
 sys.path.insert(0, root_dir)
 
-from app.services import gpt_visual_review
+from app.services import gpt_visual_review  # noqa: E402
 
 st.set_page_config(
     page_title="GPT Visual Review",

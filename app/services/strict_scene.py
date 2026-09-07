@@ -16,7 +16,7 @@ from typing import Any, Callable, List
 from loguru import logger
 
 from app.models.schema import MaterialInfo, VideoAspect
-from app.services import semantic_ranker, subtitle, task_artifacts
+from app.services import gpt_visual_review, semantic_ranker, subtitle, task_artifacts
 
 SearchVideos = Callable[..., List[MaterialInfo]]
 SaveVideo = Callable[..., str]
@@ -656,6 +656,7 @@ def download_videos_by_scene_queries(
         selected_query = ""
         bridge_ranked: list[MaterialInfo] = []
         bridge_selected = False
+        review_ranked: list[MaterialInfo] = []
 
         # A semantic bridge is intentionally opt-in with Semantic Scene Ranking.
         # It searches a combined current->next intent plus both original pools,
@@ -690,6 +691,7 @@ def download_videos_by_scene_queries(
                     enabled=True,
                     reference_items=list(selected_materials),
                 )
+                review_ranked = list(bridge_ranked)
                 scene["semantic_bridge"] = True
                 scene["semantic_query"] = semantic_query
                 for item in bridge_ranked:
@@ -716,7 +718,9 @@ def download_videos_by_scene_queries(
         if selected is None:
             for query_index in query_indexes:
                 query = terms[query_index]
-                for item in candidates_for_scene(scene, query):
+                ranked_candidates = candidates_for_scene(scene, query)
+                review_ranked = list(ranked_candidates)
+                for item in ranked_candidates:
                     result = try_candidate(item, allow_reuse=False)
                     if result is None:
                         continue
@@ -751,7 +755,9 @@ def download_videos_by_scene_queries(
         if selected is None:
             for query_index in query_indexes:
                 query = terms[query_index]
-                for item in candidates_for_scene(scene, query):
+                ranked_candidates = candidates_for_scene(scene, query)
+                review_ranked = list(ranked_candidates)
+                for item in ranked_candidates:
                     result = try_candidate(item, allow_reuse=True)
                     if result is None:
                         continue
@@ -796,6 +802,15 @@ def download_videos_by_scene_queries(
                 "semantic_reference_count": source.get("semantic_reference_count"),
             }
         )
+        gpt_visual_review.record_scene_candidates(
+            task_id=task_id,
+            scene=scene,
+            ranked_items=review_ranked or [selected_item],
+            selected_item=selected_item,
+            selected_path=saved_path,
+            selected_query=selected_query,
+        )
+
         if reused:
             logger.warning(
                 "strict scene matching reused a source as last resort: "

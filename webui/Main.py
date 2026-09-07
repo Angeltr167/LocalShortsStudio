@@ -1067,6 +1067,9 @@ def _render_task_table(filtered_tasks, key_prefix):
             has_restore_data = os.path.isfile(
                 os.path.join(task["task_path"], "script.json")
             )
+            has_gpt_review_data = os.path.isfile(
+                os.path.join(task["task_path"], "gpt_review_registry.json")
+            )
             safe_task_key = "".join(ch if ch.isalnum() else "_" for ch in task_id)[:40]
 
             # 使用 Streamlit 原生 bordered container + columns 保留每行操作。
@@ -1085,7 +1088,7 @@ def _render_task_table(filtered_tasks, key_prefix):
                 row_cols[3].write(f"{task['progress']}%")
 
                 action_cols = row_cols[4].columns(
-                    4,
+                    5,
                     vertical_alignment="center",
                     gap="small",
                 )
@@ -1125,6 +1128,19 @@ def _render_task_table(filtered_tasks, key_prefix):
                         _queue_task_restore(task_id)
 
                 with action_cols[3]:
+                    review_label = "GPT Visual Review"
+                    if st.button(
+                        review_label,
+                        key=f"gpt_review_task_{key_prefix}_{task_id}",
+                        use_container_width=True,
+                        icon=":material/rate_review:",
+                        help=review_label,
+                        disabled=is_processing or not has_gpt_review_data,
+                    ):
+                        st.session_state["gpt_visual_review_task_id"] = task_id
+                        st.switch_page("pages/GPT_Visual_Review.py")
+
+                with action_cols[4]:
                     delete_label = tr("Delete Task")
                     delete_help = (
                         f"{delete_label} ({tr('Task Status Processing')})"
