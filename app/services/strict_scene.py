@@ -78,7 +78,69 @@ def build_scene_plan(
                 "status": "pending",
             }
         )
+    # When audio needs more timeline slots than there are visual intents, the
+    # deterministic distribution creates adjacent repeats. Mark only the final
+    # slot of a repeated run as a semantic bridge toward the next narrative
+    # intent. Strict mode without semantic ranking keeps its existing behavior;
+    # the bridge metadata is consumed only by the semantic downloader path.
+    run_start = 0
+    while run_start < len(plan):
+        run_query_index = int(plan[run_start]["query_index"])
+        run_end = run_start + 1
+        while (
+            run_end < len(plan)
+            and int(plan[run_end]["query_index"]) == run_query_index
+        ):
+            run_end += 1
+
+        if run_end - run_start > 1 and run_end < len(plan):
+            next_query_index = int(plan[run_end]["query_index"])
+            if next_query_index > run_query_index:
+                bridge_scene = plan[run_end - 1]
+                bridge_scene["bridge_to_query_index"] = next_query_index
+                bridge_scene["bridge_to_query"] = terms[next_query_index]
+                bridge_scene["bridge_query"] = _build_bridge_query(
+                    terms[run_query_index],
+                    terms[next_query_index],
+                )
+
+        run_start = run_end
+
     return plan
+
+
+def _build_bridge_query(
+    current_query: str,
+    next_query: str,
+    *,
+    max_chars: int = 180,
+) -> str:
+    """Build a bounded provider/CLIP query that represents a narrative transition."""
+
+    current = " ".join(str(current_query or "").split())
+    following = " ".join(str(next_query or "").split())
+    if not current:
+        return following[:max_chars].strip()
+    if not following:
+        return current[:max_chars].strip()
+
+    combined = f"{current}; {following}"
+    if len(combined) <= max_chars:
+        return combined
+
+    # Preserve useful text from both sides instead of truncating away the next
+    # narrative intent when user-entered keywords are unusually verbose.
+    usable = max(8, max_chars - 2)
+    current_budget = usable // 2
+    following_budget = usable - current_budget
+
+    def trim(value: str, budget: int) -> str:
+        if len(value) <= budget:
+            return value
+        shortened = value[:budget].rsplit(" ", 1)[0].strip()
+        return shortened or value[:budget].strip()
+
+    return f"{trim(current, current_budget)}; {trim(following, following_budget)}"
 
 
 def _fallback_query_indexes(primary_index: int, query_count: int) -> list[int]:
@@ -166,6 +228,20 @@ def download_videos_by_scene_queries(
             )
         return raw_candidate_cache[query]
 
+    def merged_raw_candidates(queries: list[str]) -> List[MaterialInfo]:
+        """Merge provider searches while deduplicating alternate renditions/assets."""
+
+        merged: list[MaterialInfo] = []
+        seen: set[str] = set()
+        for query in queries:
+            for item in raw_candidates_for(query):
+                identity = _material_identity(item)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                merged.append(item)
+        return merged
+
     def candidates_for(query: str) -> List[MaterialInfo]:
         return semantic_ranker.rank_materials(
             query,
@@ -212,19 +288,86 @@ def download_videos_by_scene_queries(
         selected: tuple[str, bool] | None = None
         selected_item: MaterialInfo | None = None
         selected_query = ""
+        bridge_ranked: list[MaterialInfo] = []
+        bridge_selected = False
+
+        # A semantic bridge is intentionally opt-in with Semantic Scene Ranking.
+        # It searches a combined current->next intent plus both original pools,
+        # then lets CLIP and the existing reference-image penalty pick a transition
+        # shot. If the combined query is sparse or the ranker is offline, the
+        # ordinary strict fallback path below remains intact.
+        if semantic_scene_ranking:
+            bridge_to_index = scene.get("bridge_to_query_index")
+            bridge_query = str(scene.get("bridge_query") or "").strip()
+            if (
+                isinstance(bridge_to_index, int)
+                and 0 <= bridge_to_index < len(terms)
+                and bridge_query
+            ):
+                bridge_raw = merged_raw_candidates(
+                    [
+                        bridge_query,
+                        terms[primary_index],
+                        terms[bridge_to_index],
+                    ]
+                )
+                bridge_ranked = semantic_ranker.rank_materials(
+                    bridge_query,
+                    bridge_raw,
+                    enabled=True,
+                    reference_items=list(selected_materials),
+                )
+                scene["semantic_bridge"] = True
+                scene["semantic_query"] = bridge_query
+                for item in bridge_ranked:
+                    result = try_candidate(item, allow_reuse=False)
+                    if result is None:
+                        continue
+                    selected = result
+                    selected_item = item
+                    source = (
+                        item.source_info
+                        if isinstance(item.source_info, dict)
+                        else {}
+                    )
+                    selected_query = str(
+                        source.get("search_term") or bridge_query
+                    )
+                    bridge_selected = True
+                    break
 
         # First pass: only unused source assets.
-        for query_index in query_indexes:
-            query = terms[query_index]
-            for item in candidates_for(query):
-                result = try_candidate(item, allow_reuse=False)
+        if selected is None:
+            for query_index in query_indexes:
+                query = terms[query_index]
+                for item in candidates_for(query):
+                    result = try_candidate(item, allow_reuse=False)
+                    if result is None:
+                        continue
+                    selected = result
+                    selected_item = item
+                    selected_query = query
+                    break
+                if selected is not None:
+                    break
+
+        # If every unused bridge candidate failed to download, allow bridge reuse
+        # before falling all the way back to the ordinary nearest-query pool.
+        if selected is None and bridge_ranked:
+            bridge_query = str(scene.get("bridge_query") or "").strip()
+            for item in bridge_ranked:
+                result = try_candidate(item, allow_reuse=True)
                 if result is None:
                     continue
                 selected = result
                 selected_item = item
-                selected_query = query
-                break
-            if selected is not None:
+                source = (
+                    item.source_info
+                    if isinstance(item.source_info, dict)
+                    else {}
+                )
+                selected_query = str(source.get("search_term") or bridge_query)
+                bridge_selected = True
                 break
 
         # Last resort: allow a source to repeat rather than leaving the timeline short.
@@ -263,6 +406,7 @@ def download_videos_by_scene_queries(
                 "asset_id": source.get("asset_id"),
                 "local_file": Path(saved_path).name,
                 "reused": bool(reused),
+                "bridge_selected": bool(bridge_selected),
                 "semantic_score": source.get("semantic_score"),
                 "semantic_positive_score": source.get("semantic_positive_score"),
                 "semantic_negative_score": source.get("semantic_negative_score"),

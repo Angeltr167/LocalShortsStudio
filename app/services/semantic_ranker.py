@@ -33,6 +33,9 @@ _NEGATIVE_QUERY_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
             "person holding a smartphone and looking at it",
             "person talking on a smartphone",
             "smartphone being actively used in hand",
+            "digital alarm clock on a desk",
+            "digital timer display",
+            "desk clock close up",
         ),
     ),
     (

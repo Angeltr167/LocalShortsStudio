@@ -42,6 +42,8 @@ def test_build_negative_queries_targets_ambiguous_phone_and_writing_scenes():
     )
     assert "person holding a smartphone and looking at it" in phone_negatives
     assert "person talking on a smartphone" in phone_negatives
+    assert "digital alarm clock on a desk" in phone_negatives
+    assert "digital timer display" in phone_negatives
 
     writing_negatives = semantic_ranker.build_negative_queries(
         "hand writing next task in notebook to do list"
@@ -203,6 +205,75 @@ def test_strict_scene_reranks_repeated_query_with_selected_visual_context():
     assert rerank.call_count == 2
     assert rerank.call_args_list[0].kwargs["reference_items"] == []
     assert rerank.call_args_list[1].kwargs["reference_items"] == [first]
+
+
+def test_semantic_bridge_searches_transition_before_repeating_primary_intent():
+    first = _item("first", "https://images.pexels.com/first.jpg")
+    transition = _item("transition", "https://images.pexels.com/transition.jpg")
+    second = _item("second", "https://images.pexels.com/second.jpg")
+    bridge_query = strict_scene._build_bridge_query("morning coffee", "focused work")
+    captured_plans = []
+
+    def search_videos(search_term, minimum_duration, video_aspect):
+        del minimum_duration, video_aspect
+        if search_term == "morning coffee":
+            first.source_info["search_term"] = search_term
+            return [first]
+        if search_term == "focused work":
+            second.source_info["search_term"] = search_term
+            return [second]
+        if search_term == bridge_query:
+            transition.source_info["search_term"] = search_term
+            return [transition]
+        return []
+
+    def save_video(video_url, save_dir):
+        del save_dir
+        return str(Path("/tmp") / Path(video_url).name)
+
+    def capture_plan(task_id, **updates):
+        del task_id
+        if "scene_plan" in updates:
+            captured_plans.append([dict(scene) for scene in updates["scene_plan"]])
+        return True
+
+    with (
+        patch(
+            "app.services.strict_scene.task_artifacts.patch_script_data",
+            side_effect=capture_plan,
+        ),
+        patch(
+            "app.services.strict_scene.semantic_ranker.rank_materials",
+            side_effect=lambda query, items, **kwargs: list(items),
+        ) as rerank,
+    ):
+        paths = strict_scene.download_videos_by_scene_queries(
+            task_id="semantic-bridge-test",
+            search_terms=["morning coffee", "focused work"],
+            search_videos=search_videos,
+            save_video=save_video,
+            source_record=lambda item, path: {
+                "asset_id": item.source_info["asset_id"]
+            },
+            persist_sources=lambda task_id, sources: None,
+            redact_error=lambda error, secret: str(error).replace(secret, "***"),
+            video_aspect=VideoAspect.portrait,
+            audio_duration=7,
+            max_clip_duration=3,
+            material_directory="/tmp",
+            semantic_scene_ranking=True,
+        )
+
+    assert [Path(path).name for path in paths] == [
+        "first.mp4",
+        "transition.mp4",
+        "second.mp4",
+    ]
+    assert any(call.args[0] == bridge_query for call in rerank.call_args_list)
+    bridge_scene = captured_plans[-1][1]
+    assert bridge_scene["semantic_bridge"] is True
+    assert bridge_scene["bridge_selected"] is True
+    assert bridge_scene["selected_query"] == bridge_query
 
 
 def test_task_semantic_ranking_requires_strict_stock_source():

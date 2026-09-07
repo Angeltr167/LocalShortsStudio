@@ -40,6 +40,11 @@ def test_scene_plan_repeats_queries_only_in_contiguous_slots():
         (3, 6),
         (6, 7.0),
     ]
+    assert "bridge_to_query_index" not in plan[0]
+    assert plan[1]["bridge_to_query_index"] == 1
+    assert plan[1]["bridge_to_query"] == "second action"
+    assert plan[1]["bridge_query"] == "first action; second action"
+    assert "bridge_to_query_index" not in plan[2]
 
 
 def test_strict_downloader_avoids_duplicate_asset_when_alternative_exists():
