@@ -21,8 +21,65 @@ from app.models.schema import MaterialInfo
 DEFAULT_SEMANTIC_RANKER_BASE_URL = "http://127.0.0.1:4124"
 MAX_CANDIDATES = 20
 MAX_PREVIEWS_PER_CANDIDATE = 4
+MAX_NEGATIVE_QUERIES = 8
+MAX_REFERENCE_PREVIEWS = 12
 _CONNECT_TIMEOUT_SECONDS = 2
 _READ_TIMEOUT_SECONDS = 90
+
+_NEGATIVE_QUERY_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        ("face down", "do not disturb", "silence notification", "silence notifications"),
+        (
+            "person holding a smartphone and looking at it",
+            "person talking on a smartphone",
+            "smartphone being actively used in hand",
+        ),
+    ),
+    (
+        ("no phone", "without phone"),
+        (
+            "person holding a smartphone",
+            "person checking a phone",
+            "phone screen close up",
+        ),
+    ),
+    (
+        ("deep work", "focused person", "focused worker", "productive person"),
+        (
+            "distracted person checking smartphone",
+            "person multitasking between phone and computer",
+        ),
+    ),
+    (
+        ("writing", "notebook", "to do list", "checklist", "write down"),
+        (
+            "person checking smartphone",
+            "phone screen close up",
+            "person only typing on a keyboard",
+        ),
+    ),
+    (
+        ("multiple computer screens", "multiple screens", "multitasking"),
+        (
+            "single task focused worker at one laptop",
+            "person writing calmly in a notebook",
+        ),
+    ),
+    (
+        ("checking email", "email"),
+        (
+            "person talking on a phone",
+            "social media scrolling on smartphone",
+        ),
+    ),
+    (
+        ("notification", "notifications", "interrupting work"),
+        (
+            "smartphone lying unused face down",
+            "focused work with no phone visible",
+        ),
+    ),
+)
 
 
 def _evenly_spaced(values: list[str], limit: int) -> list[str]:
@@ -53,6 +110,48 @@ def preview_urls(item: MaterialInfo) -> list[str]:
     return _evenly_spaced(values, MAX_PREVIEWS_PER_CANDIDATE)
 
 
+def build_negative_queries(query: str) -> list[str]:
+    """Build deterministic anti-concepts for visually ambiguous stock searches.
+
+    These rules do not call an LLM. They only add contrastive descriptions when
+    the scene query contains a cue where CLIP commonly over-rewards a generic
+    object (for example any phone instead of a phone lying face down).
+    """
+    normalized = " ".join(str(query or "").lower().split())
+    if not normalized:
+        return []
+
+    negatives: list[str] = []
+    seen: set[str] = set()
+    for cues, descriptions in _NEGATIVE_QUERY_RULES:
+        if not any(cue in normalized for cue in cues):
+            continue
+        for description in descriptions:
+            if description in seen:
+                continue
+            seen.add(description)
+            negatives.append(description)
+            if len(negatives) >= MAX_NEGATIVE_QUERIES:
+                return negatives
+    return negatives
+
+
+def reference_preview_urls(items: List[MaterialInfo]) -> list[str]:
+    """Return a bounded set of previews from clips already chosen on the timeline."""
+    values: list[str] = []
+    seen: set[str] = set()
+    # Recent selections matter most for perceived repetition, so walk backwards.
+    for item in reversed(items):
+        for value in _evenly_spaced(preview_urls(item), 2):
+            if value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+            if len(values) >= MAX_REFERENCE_PREVIEWS:
+                return values
+    return values
+
+
 def _candidate_id(item: MaterialInfo, index: int) -> str:
     source = item.source_info if isinstance(item.source_info, dict) else {}
     provider = str(item.provider or source.get("provider") or "unknown")
@@ -81,8 +180,9 @@ def rank_materials(
     items: List[MaterialInfo],
     *,
     enabled: bool,
+    reference_items: List[MaterialInfo] | None = None,
 ) -> List[MaterialInfo]:
-    """Rerank stock materials by local text-image similarity.
+    """Rerank stock materials by contrastive semantics and visual diversity.
 
     The function is deliberately fail-open: any transport, schema, or scoring
     failure returns the provider ordering unchanged.
@@ -112,9 +212,13 @@ def rank_materials(
         logger.info("semantic scene ranking skipped: candidates have no preview images")
         return ordered
 
+    negatives = build_negative_queries(query)
+    references = reference_preview_urls(reference_items or [])
     base_url = _base_url()
     payload = {
         "query": str(query or "").strip(),
+        "negative_queries": negatives,
+        "reference_preview_urls": references,
         "candidates": payload_candidates,
     }
 
@@ -152,18 +256,27 @@ def rank_materials(
         if item is None or candidate_id in used_ids:
             continue
 
-        try:
-            score = float(row.get("score"))
-        except (TypeError, ValueError, OverflowError):
-            score = math.nan
-
         source = dict(item.source_info) if isinstance(item.source_info, dict) else {}
-        if math.isfinite(score):
-            source["semantic_score"] = round(score, 6)
+        for response_key, source_key in (
+            ("score", "semantic_score"),
+            ("positive_score", "semantic_positive_score"),
+            ("negative_score", "semantic_negative_score"),
+            ("diversity_similarity", "semantic_diversity_similarity"),
+        ):
+            try:
+                score = float(row.get(response_key))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(score):
+                source[source_key] = round(score, 6)
+
         source["semantic_rank"] = rank_index
         model_name = body.get("model") if isinstance(body, dict) else None
         if model_name:
             source["semantic_ranker_model"] = str(model_name)
+        if negatives:
+            source["semantic_negative_queries"] = list(negatives)
+        source["semantic_reference_count"] = len(references)
         item.source_info = source
         ranked_items.append(item)
         used_ids.add(candidate_id)
@@ -183,7 +296,8 @@ def rank_materials(
     )
     logger.info(
         "semantic scene candidates reranked: "
-        f"query={query!r}, candidates={len(selected)}, "
+        f"query={query!r}, candidates={len(selected)}, negatives={len(negatives)}, "
+        f"references={len(references)}, "
         f"top_score={top_source.get('semantic_score', 'n/a')}"
     )
     return ranked_items
