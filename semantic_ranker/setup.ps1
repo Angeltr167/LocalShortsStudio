@@ -9,19 +9,20 @@ if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
 
 $python = ".\.venv\Scripts\python.exe"
 
-# Install the service dependencies first, then force the same CUDA 12.4 PyTorch
-# family already proven on the target RTX 4060 laptop.
+# Install the proven CUDA 12.4 PyTorch build first. Installing OpenCLIP afterward
+# lets its dependency resolver reuse this GPU build instead of downloading a CPU
+# torch wheel and replacing it again.
+uv pip install --python $python `
+    "torch==2.6.0" `
+    "torchvision==0.21.0" `
+    --index-url https://download.pytorch.org/whl/cu124
+
 uv pip install --python $python `
     "open_clip_torch==3.3.0" `
     "fastapi==0.136.3" `
     "uvicorn==0.32.1" `
     "pillow>=11.0,<12" `
     "requests>=2.32,<3"
-
-uv pip install --python $python --reinstall `
-    "torch==2.6.0" `
-    "torchvision==0.21.0" `
-    --index-url https://download.pytorch.org/whl/cu124
 
 & $python -c "import torch, open_clip; print('Torch:', torch.__version__); print('CUDA:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'); print('OpenCLIP:', open_clip.__version__)"
 
