@@ -20,7 +20,7 @@ from app.utils import utils
 
 
 MATERIAL_SEARCH_CACHE_TTL_SECONDS = 24 * 60 * 60
-_CACHE_FORMAT_VERSION = 2
+_CACHE_FORMAT_VERSION = 3
 _CACHE_CLEANUP_INTERVAL_SECONDS = 60 * 60
 _CACHE_FILE_PATTERN = re.compile(r"^[0-9a-f]{64}\.json$")
 
@@ -48,6 +48,31 @@ def _safe_public_url(value) -> str | None:
     ):
         return None
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+_ALLOWED_PREVIEW_HOST_SUFFIXES = (
+    "pexels.com",
+    "pixabay.com",
+    "coverr.co",
+)
+_MAX_CACHED_PREVIEW_IMAGES = 4
+
+
+def _safe_preview_url(value) -> str | None:
+    """Keep only public stock-provider preview URLs and strip query credentials."""
+    sanitized = _safe_public_url(value)
+    if not sanitized:
+        return None
+    try:
+        hostname = (urlsplit(sanitized).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    if not any(
+        hostname == suffix or hostname.endswith(f".{suffix}")
+        for suffix in _ALLOWED_PREVIEW_HOST_SUFFIXES
+    ):
+        return None
+    return sanitized
 
 
 def _cached_source_info(item: MaterialInfo) -> dict | None:
@@ -96,6 +121,19 @@ def _cached_source_info(item: MaterialInfo) -> dict | None:
                 rendition[field] = str(value) if field == "id" else value
         if rendition:
             cached["rendition"] = rendition
+
+    raw_previews = source.get("preview_images")
+    if isinstance(raw_previews, list):
+        previews: list[str] = []
+        for value in raw_previews:
+            preview = _safe_preview_url(value)
+            if not preview or preview in previews:
+                continue
+            previews.append(preview)
+            if len(previews) >= _MAX_CACHED_PREVIEW_IMAGES:
+                break
+        if previews:
+            cached["preview_images"] = previews
     return cached
 
 

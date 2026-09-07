@@ -45,6 +45,9 @@ class TestMaterialSearchCache(unittest.TestCase):
                     "width": 1080,
                     "height": 1920,
                 },
+                "preview_images": [
+                    "https://cdn.pixabay.com/video/2026/09/07/preview.jpg",
+                ],
             },
         )
 
@@ -89,6 +92,10 @@ class TestMaterialSearchCache(unittest.TestCase):
         self.assertEqual(
             loaded[0].source_info["creator"]["profile_page"],
             "https://pixabay.com/users/creator-456/",
+        )
+        self.assertEqual(
+            loaded[0].source_info["preview_images"],
+            ["https://cdn.pixabay.com/video/2026/09/07/preview.jpg"],
         )
 
     def test_expired_cache_is_removed_and_treated_as_miss(self):
@@ -188,6 +195,9 @@ class TestMaterialSearchCache(unittest.TestCase):
         item = self._item()
         item.source_info["source_page"] += "?token=drop"
         item.source_info["creator"]["profile_page"] += "?key=drop"
+        item.source_info["preview_images"] = [
+            "https://cdn.pixabay.com/video/2026/09/07/preview.jpg?preview_token=drop"
+        ]
         material_cache.save_material_search_cache(
             provider="pixabay",
             search_term="private search term",
@@ -204,6 +214,10 @@ class TestMaterialSearchCache(unittest.TestCase):
         self.assertEqual(set(payload), {"version", "items"})
         self.assertNotIn("private search term", raw_payload)
         self.assertNotIn("token=drop", raw_payload)
+        self.assertEqual(
+            payload["items"][0]["source_info"]["preview_images"],
+            ["https://cdn.pixabay.com/video/2026/09/07/preview.jpg"],
+        )
 
     def test_coverr_signed_urls_are_never_cached(self):
         """Coverr 下载地址包含签名 JWT，不能进入可长期保留的磁盘缓存。"""
@@ -270,6 +284,44 @@ class TestMaterialSearchCache(unittest.TestCase):
                             "provider": "pixabay",
                             "url": "https://example.com/old.mp4",
                             "duration": 12,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        loaded = material_cache.load_material_search_cache(
+            provider="pixabay",
+            search_term="nature",
+            minimum_duration=5,
+            video_aspect=VideoAspect.portrait,
+        )
+
+        self.assertIsNone(loaded)
+        self.assertFalse(cache_path.exists())
+
+    def test_version_two_cache_is_invalidated(self):
+        """V2 omitted semantic preview URLs, so it must refresh from the provider."""
+        cache_path = self._cache_path()
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "items": [
+                        {
+                            "provider": "pixabay",
+                            "url": "https://example.com/old-v2.mp4",
+                            "duration": 12,
+                            "source_info": {
+                                "provider": "pixabay",
+                                "asset_id": "old-v2",
+                                "rendition": {
+                                    "id": "large",
+                                    "width": 1080,
+                                    "height": 1920,
+                                },
+                            },
                         }
                     ],
                 }
