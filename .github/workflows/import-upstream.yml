@@ -20,6 +20,7 @@ jobs:
       - name: Preserve importer and clone upstream snapshot
         run: |
           cp .github/workflows/import-upstream.yml /tmp/import-upstream.yml
+          cp .import-trigger /tmp/import-trigger
           git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git /tmp/mpt-upstream
           rm -rf /tmp/mpt-upstream/.git
 
@@ -30,7 +31,7 @@ jobs:
           rm -rf .github/workflows
           mkdir -p .github/workflows
           cp /tmp/import-upstream.yml .github/workflows/import-upstream.yml
-          printf 'import MoneyPrinterTurbo upstream snapshot\n' > .import-trigger
+          cp /tmp/import-trigger .import-trigger
 
       - name: Commit imported snapshot
         run: |
