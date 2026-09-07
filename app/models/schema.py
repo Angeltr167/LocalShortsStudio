@@ -113,6 +113,9 @@ class VideoParams(BaseModel):
     video_clip_duration: int = Field(default=5, ge=1)
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False
+    # Opt-in stock-footage assignment that maps ordered visual queries to
+    # clip-sized timeline scenes. Disabled by default for compatibility.
+    strict_scene_matching: bool = False
     video_count: int = Field(default=1, ge=1)
 
     video_source: Optional[str] = "pexels"

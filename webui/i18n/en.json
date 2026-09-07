@@ -111,6 +111,8 @@
     "Number of Videos Generated Simultaneously": "Videos per Run",
     "Match Materials to Script Order": "Match Visuals to Script Order",
     "Match Materials to Script Order Help": "Generate keywords and match materials in script order so visuals follow the current voiceover.",
+    "Strict Scene Matching": "Strict Scene Matching",
+    "Strict Scene Matching Help": "Treat ordered stock-video keywords as scene queries, assign one clip per timeline scene, avoid duplicate sources when possible, and preserve narrative order. Available for Pexels, Pixabay, and Coverr.",
     "Audio Settings": "**Audio Settings**",
     "Voiceover Mode": "Voiceover Mode",
     "Automatic Voiceover": "Auto",

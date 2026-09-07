@@ -516,6 +516,9 @@ def _initialize_session_state():
         "match_materials_to_script": bool(
             config.app.get("match_materials_to_script", False)
         ),
+        "strict_scene_matching": bool(
+            config.app.get("strict_scene_matching", False)
+        ),
         "custom_bgm_file_input": _saved_ui_text("custom_bgm_file"),
         "sonilo_bgm_prompt_input": _saved_ui_text(
             "sonilo_bgm_prompt",
@@ -1347,8 +1350,13 @@ def _apply_restored_params(params):
         utils.normalize_clip_speed(params.get("video_clip_speed", 1.0)),
     )
     _set_stable_widget_value("video_count_select", params.get("video_count", 1))
+    restored_strict_scene_matching = bool(
+        params.get("strict_scene_matching", False)
+    )
+    st.session_state["strict_scene_matching"] = restored_strict_scene_matching
     st.session_state["match_materials_to_script"] = bool(
         params.get("match_materials_to_script", False)
+        or restored_strict_scene_matching
     )
 
     # 音频设置。TTS server 未写入旧任务，根据历史 voice_name 推断。
@@ -2266,12 +2274,15 @@ def grouped_selectbox(
 
 
 def sync_script_order_concat_mode():
-    """在文案顺序匹配开启时固定使用顺序拼接，并在关闭后恢复原选择。"""
+    """Force sequential composition while either ordered mode is enabled."""
     widget_key = localized_widget_key("video_concat_mode_select")
     previous_key = "video_concat_mode_before_script_order_match"
-    match_script_order = bool(st.session_state.get("match_materials_to_script", False))
+    ordered_mode_enabled = bool(
+        st.session_state.get("match_materials_to_script", False)
+        or st.session_state.get("strict_scene_matching", False)
+    )
 
-    if match_script_order:
+    if ordered_mode_enabled:
         current_mode = st.session_state.get(widget_key, VideoConcatMode.random.value)
         if current_mode != VideoConcatMode.sequential.value:
             st.session_state[previous_key] = current_mode
@@ -2284,6 +2295,23 @@ def sync_script_order_concat_mode():
         VideoConcatMode.random.value,
     }:
         st.session_state[widget_key] = previous_mode
+
+
+def sync_strict_scene_matching():
+    """Strict mode implies script-order matching and restores the previous toggle."""
+    previous_key = "match_materials_before_strict_scene_matching"
+    strict_enabled = bool(st.session_state.get("strict_scene_matching", False))
+    if strict_enabled:
+        st.session_state.setdefault(
+            previous_key,
+            bool(st.session_state.get("match_materials_to_script", False)),
+        )
+        st.session_state["match_materials_to_script"] = True
+    else:
+        previous_match = st.session_state.pop(previous_key, None)
+        if previous_match is not None:
+            st.session_state["match_materials_to_script"] = bool(previous_match)
+    sync_script_order_concat_mode()
 
 
 def reset_script_system_prompt():
@@ -4514,24 +4542,55 @@ def _render_video_settings(panel, params):
                 format_func=lambda value: dict(
                     (v, label) for label, v in video_concat_modes
                 )[value],
-                disabled=bool(st.session_state.get("match_materials_to_script", False)),
+                disabled=bool(
+                    st.session_state.get("match_materials_to_script", False)
+                    or st.session_state.get("strict_scene_matching", False)
+                ),
             )
             params.video_concat_mode = VideoConcatMode(selected_concat_mode)
+
+            strict_scene_supported = (
+                params.video_source in VIDEO_SOURCE_GROUPS["stock_video"]
+            )
+            if (
+                not strict_scene_supported
+                and st.session_state.get("strict_scene_matching", False)
+            ):
+                st.session_state["strict_scene_matching"] = False
+                sync_strict_scene_matching()
 
             params.match_materials_to_script = st.checkbox(
                 tr("Match Materials to Script Order"),
                 help=tr("Match Materials to Script Order Help"),
                 key="match_materials_to_script",
                 on_change=sync_script_order_concat_mode,
+                disabled=bool(st.session_state.get("strict_scene_matching", False)),
             )
+            params.strict_scene_matching = st.checkbox(
+                tr("Strict Scene Matching"),
+                help=tr("Strict Scene Matching Help"),
+                key="strict_scene_matching",
+                on_change=sync_strict_scene_matching,
+                disabled=not strict_scene_supported,
+            )
+            if params.strict_scene_matching:
+                params.match_materials_to_script = True
+
             _set_runtime_config(
                 "app",
                 "match_materials_to_script",
                 params.match_materials_to_script,
             )
-            # 顺序匹配开启时，sequential 是派生出的强制值，不应覆盖用户在关闭
-            # 该功能时选择的拼接偏好；关闭后仍能恢复此前的 random/sequential。
-            if not params.match_materials_to_script:
+            _set_runtime_config(
+                "app",
+                "strict_scene_matching",
+                params.strict_scene_matching,
+            )
+            # Ordered modes derive sequential composition and must not overwrite the
+            # normal random/sequential preference while they are active.
+            if not (
+                params.match_materials_to_script or params.strict_scene_matching
+            ):
                 _set_runtime_config(
                     "ui", "video_concat_mode", params.video_concat_mode.value
                 )
@@ -6991,8 +7050,12 @@ def _render_application():
     right_panel = panel[3]
 
     params = VideoParams(video_subject="")
+    params.strict_scene_matching = bool(
+        st.session_state.get("strict_scene_matching", False)
+    )
     params.match_materials_to_script = bool(
         st.session_state.get("match_materials_to_script", False)
+        or params.strict_scene_matching
     )
     _render_script_settings(left_panel, params)
 

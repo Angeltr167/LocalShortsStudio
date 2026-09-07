@@ -402,6 +402,8 @@
     "OFox Upstream Vendor Help": "Nhà cung cấp thượng nguồn phục vụ việc tạo video OFox. BytePlus (quốc tế) là mặc định với chính sách nội dung nhất quán; Volcano Engine là nhà cung cấp Trung Quốc đại lục; Tự động để gateway OFox cân bằng tải giữa các nhà cung cấp.",
     "OFox Vendor BytePlus": "BytePlus (quốc tế, mặc định)",
     "OFox Vendor Volcengine": "Volcano Engine (Trung Quốc đại lục)",
-    "OFox Vendor Auto": "Tự động (gateway cân bằng tải)"
+    "OFox Vendor Auto": "Tự động (gateway cân bằng tải)",
+    "Strict Scene Matching": "Khớp cảnh nghiêm ngặt",
+    "Strict Scene Matching Help": "Dùng các từ khóa video stock theo thứ tự làm truy vấn cảnh, gán một clip cho mỗi cảnh trên timeline, tránh nguồn trùng lặp khi có thể và giữ nguyên thứ tự nội dung. Hỗ trợ Pexels, Pixabay và Coverr."
   }
 }

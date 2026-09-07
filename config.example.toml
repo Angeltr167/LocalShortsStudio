@@ -77,6 +77,10 @@ tls_verify = true
 # or cloud relays) and renders it into a video clip.
 video_source = "pexels"
 
+# Opt-in scene assignment for stock footage. Ordered keywords become scene
+# queries; one clip is chosen for each clip-sized narration slot.
+strict_scene_matching = false
+
 # API key lists support key rotation. Use straight ASCII double quotes and
 # separate multiple keys with commas, for example: ["key-1", "key-2"].
 # Key 必须使用英文半角双引号，多个 Key 使用英文逗号分隔。

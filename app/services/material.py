@@ -19,6 +19,7 @@ from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
 from app.services import (
     material_cache,
+    strict_scene,
     metaso_minimax,
     ofox,
     task_artifacts,
@@ -1664,6 +1665,7 @@ def download_videos(
     audio_duration: float = 0.0,
     max_clip_duration: int = 5,
     match_script_order: bool = False,
+    strict_scene_matching: bool = False,
 ) -> List[str]:
     provider = "pexels"
     remote_search_videos = search_videos_pexels
@@ -1748,6 +1750,21 @@ def download_videos(
         return _download_videos_openai_image_on_demand(
             task_id=task_id,
             search_terms=search_terms,
+            video_aspect=video_aspect,
+            audio_duration=audio_duration,
+            max_clip_duration=max_clip_duration,
+            material_directory=material_directory,
+        )
+
+    if strict_scene_matching and source in {"pexels", "pixabay", "coverr"}:
+        return strict_scene.download_videos_by_scene_queries(
+            task_id=task_id,
+            search_terms=search_terms,
+            search_videos=search_videos,
+            save_video=save_video,
+            source_record=_material_source_record,
+            persist_sources=_persist_material_sources,
+            redact_error=_redact_request_error,
             video_aspect=video_aspect,
             audio_duration=audio_duration,
             max_clip_duration=max_clip_duration,

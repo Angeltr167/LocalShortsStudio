@@ -402,6 +402,8 @@
     "OFox Upstream Vendor Help": "Quale fornitore upstream serve la generazione video OFox. BytePlus (internazionale) è il predefinito, con una politica dei contenuti coerente; Volcano Engine è il fornitore della Cina continentale; Auto lascia che il gateway OFox bilanci il carico tra i fornitori.",
     "OFox Vendor BytePlus": "BytePlus (internazionale, predefinito)",
     "OFox Vendor Volcengine": "Volcano Engine (Cina continentale)",
-    "OFox Vendor Auto": "Auto (bilanciamento del gateway)"
+    "OFox Vendor Auto": "Auto (bilanciamento del gateway)",
+    "Strict Scene Matching": "Corrispondenza rigorosa delle scene",
+    "Strict Scene Matching Help": "Tratta le parole chiave ordinate dei video stock come ricerche di scena, assegna un clip a ogni scena della timeline, evita fonti duplicate quando possibile e mantiene l’ordine narrativo. Disponibile per Pexels, Pixabay e Coverr."
   }
 }

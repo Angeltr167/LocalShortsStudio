@@ -88,6 +88,17 @@ _VIDEO_MUSIC_PROVIDERS = {
 }
 
 
+_STOCK_VIDEO_SOURCES = frozenset({"pexels", "pixabay", "coverr"})
+
+
+def _strict_scene_matching_enabled(params: VideoParams) -> bool:
+    """Strict scene assignment only applies to searchable stock-video providers."""
+    return bool(
+        params.strict_scene_matching
+        and params.video_source in _STOCK_VIDEO_SOURCES
+    )
+
+
 def _get_video_music_prompt(params: VideoParams) -> str:
     """
     读取当前视频配乐供应商实际使用的提示词。
@@ -727,12 +738,20 @@ def get_video_materials(
                 video_aspect=params.video_aspect,
                 video_concat_mode=(
                     VideoConcatMode.sequential
-                    if params.match_materials_to_script
+                    if (
+                        params.match_materials_to_script
+                        or _strict_scene_matching_enabled(params)
+                    )
                     else params.video_concat_mode
                 ),
-                audio_duration=audio_duration * params.video_count,
+                audio_duration=(
+                    audio_duration
+                    if _strict_scene_matching_enabled(params)
+                    else audio_duration * params.video_count
+                ),
                 max_clip_duration=params.video_clip_duration,
                 match_script_order=params.match_materials_to_script,
+                strict_scene_matching=_strict_scene_matching_enabled(params),
             )
         except volcengine_seedance.VolcEngineSeedanceError as exc:
             # 未确认状态和已生成但下载失败都对应一个可在方舟控制台恢复的远端
@@ -846,7 +865,7 @@ def generate_final_videos(
     )
     # 多视频生成默认会打散素材以增加差异；但“按文案顺序匹配素材”追求的是
     # 时间线稳定性和可解释性，所以开启后所有输出都使用顺序拼接。
-    if params.match_materials_to_script:
+    if params.match_materials_to_script or _strict_scene_matching_enabled(params):
         video_concat_mode = VideoConcatMode.sequential
     elif params.video_count == 1:
         video_concat_mode = params.video_concat_mode
