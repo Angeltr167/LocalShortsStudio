@@ -50,20 +50,26 @@ def append_keys(locale: str, label: str, help_text: str) -> None:
     path = Path("webui/i18n") / f"{locale}.json"
     text = path.read_text(encoding="utf-8")
     data = json.loads(text)
+    translations = data.get("Translation")
+    if not isinstance(translations, dict):
+        raise RuntimeError(f"missing Translation map in {path}")
 
     expected = {
         "Strict Scene Matching": label,
         "Strict Scene Matching Help": help_text,
     }
-    if all(data.get(key) == value for key, value in expected.items()):
+    if all(translations.get(key) == value for key, value in expected.items()):
         return
-    if any(key in data for key in expected):
+    if any(key in translations for key in expected):
         raise RuntimeError(f"partial or conflicting strict-scene translation in {locale}")
 
+    # Locale files use a root metadata object with the actual UI strings nested under
+    # "Translation". Insert just before that map closes so the diff stays minimal.
     stripped = text.rstrip()
-    if not stripped.endswith("}"):
-        raise RuntimeError(f"unexpected JSON ending in {path}")
-    body = stripped[:-1].rstrip()
+    suffix = "\n  }\n}"
+    if not stripped.endswith(suffix):
+        raise RuntimeError(f"unexpected locale JSON ending in {path}")
+    body = stripped[: -len(suffix)].rstrip()
     if body and not body.endswith(","):
         body += ","
     additions = (
@@ -71,13 +77,14 @@ def append_keys(locale: str, label: str, help_text: str) -> None:
         f"    {json.dumps('Strict Scene Matching')}: "
         f"{json.dumps(label, ensure_ascii=False)},\n"
         f"    {json.dumps('Strict Scene Matching Help')}: "
-        f"{json.dumps(help_text, ensure_ascii=False)}\n"
-        "}\n"
+        f"{json.dumps(help_text, ensure_ascii=False)}"
+        "\n  }\n}\n"
     )
     updated = body + additions
     parsed = json.loads(updated)
+    parsed_translations = parsed.get("Translation") or {}
     for key, value in expected.items():
-        if parsed.get(key) != value:
+        if parsed_translations.get(key) != value:
             raise RuntimeError(f"failed to add {key!r} to {locale}")
     path.write_text(updated, encoding="utf-8")
 
