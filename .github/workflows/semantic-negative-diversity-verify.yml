@@ -34,7 +34,7 @@ jobs:
         run: uv sync --frozen --python 3.11
 
       - name: Check diff whitespace
-        run: git diff --check feature/semantic-scene-ranking...HEAD
+        run: git diff --check origin/feature/semantic-scene-ranking...HEAD
 
       - name: Compile changed Python sources
         run: >-
