@@ -10,7 +10,7 @@ safe fallback.
 from __future__ import annotations
 
 import math
-from typing import Any, List
+from typing import List
 
 import requests
 from loguru import logger
