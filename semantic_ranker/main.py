@@ -1,0 +1,288 @@
+"""Local OpenCLIP service used to rerank stock-video preview images.
+
+This process is intentionally separate from MoneyPrinterTurbo so OpenCLIP/PyTorch
+cannot disturb the main application environment or the Chatterbox environment.
+"""
+
+from __future__ import annotations
+
+import io
+import os
+import threading
+from contextlib import asynccontextmanager, nullcontext
+from urllib.parse import urlsplit
+
+import requests
+from fastapi import FastAPI, HTTPException
+from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel, Field
+
+DEFAULT_MODEL = "ViT-B-32"
+DEFAULT_PRETRAINED = "laion2b_s34b_b79k"
+DEFAULT_PORT = 4124
+MAX_CANDIDATES = 20
+MAX_PREVIEWS_PER_CANDIDATE = 4
+DEEP_RERANK_TOP_K = 5
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+ALLOWED_PREVIEW_HOST_SUFFIXES = (
+    "pexels.com",
+    "pixabay.com",
+    "coverr.co",
+)
+
+_model_lock = threading.Lock()
+_model_bundle = None
+_model_error = None
+
+
+class Candidate(BaseModel):
+    id: str = Field(min_length=1, max_length=256)
+    preview_urls: list[str] = Field(default_factory=list, max_length=MAX_PREVIEWS_PER_CANDIDATE)
+
+
+class RankRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    candidates: list[Candidate] = Field(min_length=1, max_length=MAX_CANDIDATES)
+
+
+def _configured_device(torch_module) -> str:
+    configured = str(os.environ.get("SEMANTIC_RANKER_DEVICE", "auto") or "auto").strip().lower()
+    if configured == "auto":
+        return "cuda" if torch_module.cuda.is_available() else "cpu"
+    if configured == "cuda" and not torch_module.cuda.is_available():
+        raise RuntimeError("SEMANTIC_RANKER_DEVICE=cuda but CUDA is not available")
+    if configured not in {"cpu", "cuda"}:
+        raise RuntimeError("SEMANTIC_RANKER_DEVICE must be auto, cpu, or cuda")
+    return configured
+
+
+def _load_model():
+    global _model_bundle, _model_error
+    if _model_bundle is not None:
+        return _model_bundle
+
+    with _model_lock:
+        if _model_bundle is not None:
+            return _model_bundle
+        try:
+            import open_clip
+            import torch
+
+            model_name = str(os.environ.get("SEMANTIC_RANKER_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL)
+            pretrained = str(
+                os.environ.get("SEMANTIC_RANKER_PRETRAINED", DEFAULT_PRETRAINED)
+                or DEFAULT_PRETRAINED
+            )
+            device = _configured_device(torch)
+            model, _, preprocess = open_clip.create_model_and_transforms(
+                model_name,
+                pretrained=pretrained,
+            )
+            tokenizer = open_clip.get_tokenizer(model_name)
+            model = model.to(device)
+            model.eval()
+            _model_bundle = {
+                "torch": torch,
+                "model": model,
+                "preprocess": preprocess,
+                "tokenizer": tokenizer,
+                "device": device,
+                "model_name": model_name,
+                "pretrained": pretrained,
+            }
+            _model_error = None
+        except Exception as exc:
+            _model_error = f"{type(exc).__name__}: {exc}"
+            raise
+    return _model_bundle
+
+
+def _allowed_preview_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(str(url or "").strip())
+    except ValueError:
+        return False
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        return False
+    hostname = parsed.hostname.lower().rstrip(".")
+    return any(
+        hostname == suffix or hostname.endswith(f".{suffix}")
+        for suffix in ALLOWED_PREVIEW_HOST_SUFFIXES
+    )
+
+
+def _fetch_image(url: str) -> Image.Image:
+    if not _allowed_preview_url(url):
+        raise ValueError("preview URL is not an allowed HTTPS stock-provider host")
+
+    response = requests.get(
+        url,
+        timeout=(5, 20),
+        allow_redirects=True,
+        stream=True,
+        headers={"User-Agent": "LocalShortsStudio-SemanticRanker/1.0"},
+    )
+    response.raise_for_status()
+    if not _allowed_preview_url(str(response.url)):
+        raise ValueError("preview redirect left the allowed stock-provider hosts")
+
+    content_length = response.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_IMAGE_BYTES:
+                raise ValueError("preview image exceeds size limit")
+        except ValueError as exc:
+            if str(exc) == "preview image exceeds size limit":
+                raise
+
+    chunks = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > MAX_IMAGE_BYTES:
+            raise ValueError("preview image exceeds size limit")
+        chunks.append(chunk)
+
+    try:
+        image = Image.open(io.BytesIO(b"".join(chunks)))
+        image.load()
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        raise ValueError(f"preview is not a decodable image: {type(exc).__name__}") from exc
+    return image.convert("RGB")
+
+
+def _score_images(query: str, images: list[Image.Image]) -> list[float]:
+    if not images:
+        return []
+    bundle = _load_model()
+    torch = bundle["torch"]
+    model = bundle["model"]
+    preprocess = bundle["preprocess"]
+    tokenizer = bundle["tokenizer"]
+    device = bundle["device"]
+
+    image_tensor = torch.stack([preprocess(image) for image in images]).to(device)
+    text_tensor = tokenizer([query]).to(device)
+    autocast = (
+        torch.autocast(device_type="cuda", dtype=torch.float16)
+        if device == "cuda"
+        else nullcontext()
+    )
+    with torch.inference_mode(), autocast:
+        image_features = model.encode_image(image_tensor)
+        text_features = model.encode_text(text_tensor)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        similarities = image_features @ text_features.T
+    return [float(value) for value in similarities.squeeze(1).detach().cpu().tolist()]
+
+
+def _aggregate(scores: list[float]) -> float:
+    """Reward candidates that match across more than a single lucky preview."""
+    if not scores:
+        return -1.0
+    strongest = sorted(scores, reverse=True)[: min(2, len(scores))]
+    return sum(strongest) / len(strongest)
+
+
+def _rank(request: RankRequest) -> dict:
+    bundle = _load_model()
+    per_candidate_scores: dict[str, list[float]] = {candidate.id: [] for candidate in request.candidates}
+
+    # Stage 1: score one preview for every candidate so a 20-result provider query
+    # needs only 20 image downloads before we know which candidates deserve deeper work.
+    stage1_images = []
+    stage1_ids = []
+    for candidate in request.candidates:
+        if not candidate.preview_urls:
+            continue
+        try:
+            stage1_images.append(_fetch_image(candidate.preview_urls[0]))
+            stage1_ids.append(candidate.id)
+        except Exception:
+            continue
+    stage1_scores = _score_images(request.query, stage1_images)
+    for candidate_id, score in zip(stage1_ids, stage1_scores):
+        per_candidate_scores[candidate_id].append(score)
+
+    top_ids = [
+        candidate_id
+        for candidate_id, _ in sorted(
+            ((candidate_id, _aggregate(scores)) for candidate_id, scores in per_candidate_scores.items()),
+            key=lambda pair: pair[1],
+            reverse=True,
+        )[:DEEP_RERANK_TOP_K]
+    ]
+    top_id_set = set(top_ids)
+
+    # Stage 2: use the remaining previews only for the strongest candidates.
+    stage2_images = []
+    stage2_ids = []
+    for candidate in request.candidates:
+        if candidate.id not in top_id_set:
+            continue
+        for url in candidate.preview_urls[1:]:
+            try:
+                stage2_images.append(_fetch_image(url))
+                stage2_ids.append(candidate.id)
+            except Exception:
+                continue
+    stage2_scores = _score_images(request.query, stage2_images)
+    for candidate_id, score in zip(stage2_ids, stage2_scores):
+        per_candidate_scores[candidate_id].append(score)
+
+    ranked = [
+        {
+            "id": candidate.id,
+            "score": round(_aggregate(per_candidate_scores[candidate.id]), 6),
+            "preview_count": len(per_candidate_scores[candidate.id]),
+        }
+        for candidate in request.candidates
+    ]
+    ranked.sort(key=lambda row: row["score"], reverse=True)
+    return {
+        "model": f"{bundle['model_name']}/{bundle['pretrained']}",
+        "device": bundle["device"],
+        "ranked": ranked,
+    }
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    del app
+    _load_model()
+    yield
+
+
+app = FastAPI(title="LocalShortsStudio Semantic Ranker", version="1.0", lifespan=lifespan)
+
+
+@app.get("/health")
+def health():
+    bundle = _model_bundle
+    return {
+        "status": "healthy" if bundle is not None else "initializing",
+        "model_loaded": bundle is not None,
+        "model": (
+            f"{bundle['model_name']}/{bundle['pretrained']}" if bundle is not None else None
+        ),
+        "device": bundle.get("device") if bundle is not None else None,
+        "error": _model_error,
+    }
+
+
+@app.post("/rank")
+def rank(request: RankRequest):
+    try:
+        return _rank(request)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"semantic ranking failed: {type(exc).__name__}: {exc}") from exc
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("SEMANTIC_RANKER_PORT", DEFAULT_PORT))
+    uvicorn.run(app, host="127.0.0.1", port=port)
