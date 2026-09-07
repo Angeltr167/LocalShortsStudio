@@ -10,7 +10,7 @@ import io
 import os
 import threading
 from contextlib import asynccontextmanager, nullcontext
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from fastapi import FastAPI, HTTPException
@@ -24,6 +24,7 @@ MAX_CANDIDATES = 20
 MAX_PREVIEWS_PER_CANDIDATE = 4
 DEEP_RERANK_TOP_K = 5
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_REDIRECTS = 3
 ALLOWED_PREVIEW_HOST_SUFFIXES = (
     "pexels.com",
     "pixabay.com",
@@ -111,29 +112,17 @@ def _allowed_preview_url(url: str) -> bool:
     )
 
 
-def _fetch_image(url: str) -> Image.Image:
-    if not _allowed_preview_url(url):
-        raise ValueError("preview URL is not an allowed HTTPS stock-provider host")
-
-    response = requests.get(
-        url,
-        timeout=(5, 20),
-        allow_redirects=True,
-        stream=True,
-        headers={"User-Agent": "LocalShortsStudio-SemanticRanker/1.0"},
-    )
+def _read_bounded_image_response(response: requests.Response) -> Image.Image:
     response.raise_for_status()
-    if not _allowed_preview_url(str(response.url)):
-        raise ValueError("preview redirect left the allowed stock-provider hosts")
 
     content_length = response.headers.get("content-length")
     if content_length:
         try:
-            if int(content_length) > MAX_IMAGE_BYTES:
-                raise ValueError("preview image exceeds size limit")
-        except ValueError as exc:
-            if str(exc) == "preview image exceeds size limit":
-                raise
+            declared_size = int(content_length)
+        except (TypeError, ValueError):
+            declared_size = 0
+        if declared_size > MAX_IMAGE_BYTES:
+            raise ValueError("preview image exceeds size limit")
 
     chunks = []
     total = 0
@@ -151,6 +140,43 @@ def _fetch_image(url: str) -> Image.Image:
     except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
         raise ValueError(f"preview is not a decodable image: {type(exc).__name__}") from exc
     return image.convert("RGB")
+
+
+def _fetch_image(url: str) -> Image.Image:
+    """Fetch a provider preview while validating every redirect before following it."""
+    current_url = str(url or "").strip()
+    if not _allowed_preview_url(current_url):
+        raise ValueError("preview URL is not an allowed HTTPS stock-provider host")
+
+    session = requests.Session()
+    try:
+        for redirect_index in range(MAX_REDIRECTS + 1):
+            with session.get(
+                current_url,
+                timeout=(5, 20),
+                allow_redirects=False,
+                stream=True,
+                headers={"User-Agent": "LocalShortsStudio-SemanticRanker/1.0"},
+            ) as response:
+                if response.is_redirect or response.is_permanent_redirect:
+                    if redirect_index >= MAX_REDIRECTS:
+                        raise ValueError("preview exceeded redirect limit")
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ValueError("preview redirect is missing Location")
+                    next_url = urljoin(current_url, location)
+                    if not _allowed_preview_url(next_url):
+                        raise ValueError(
+                            "preview redirect left the allowed stock-provider hosts"
+                        )
+                    current_url = next_url
+                    continue
+
+                return _read_bounded_image_response(response)
+    finally:
+        session.close()
+
+    raise ValueError("preview could not be fetched")
 
 
 def _score_images(query: str, images: list[Image.Image]) -> list[float]:
@@ -189,7 +215,9 @@ def _aggregate(scores: list[float]) -> float:
 
 def _rank(request: RankRequest) -> dict:
     bundle = _load_model()
-    per_candidate_scores: dict[str, list[float]] = {candidate.id: [] for candidate in request.candidates}
+    per_candidate_scores: dict[str, list[float]] = {
+        candidate.id: [] for candidate in request.candidates
+    }
 
     # Stage 1: score one preview for every candidate so a 20-result provider query
     # needs only 20 image downloads before we know which candidates deserve deeper work.
@@ -210,7 +238,10 @@ def _rank(request: RankRequest) -> dict:
     top_ids = [
         candidate_id
         for candidate_id, _ in sorted(
-            ((candidate_id, _aggregate(scores)) for candidate_id, scores in per_candidate_scores.items()),
+            (
+                (candidate_id, _aggregate(scores))
+                for candidate_id, scores in per_candidate_scores.items()
+            ),
             key=lambda pair: pair[1],
             reverse=True,
         )[:DEEP_RERANK_TOP_K]
@@ -223,9 +254,9 @@ def _rank(request: RankRequest) -> dict:
     for candidate in request.candidates:
         if candidate.id not in top_id_set:
             continue
-        for url in candidate.preview_urls[1:]:
+        for preview_url in candidate.preview_urls[1:]:
             try:
-                stage2_images.append(_fetch_image(url))
+                stage2_images.append(_fetch_image(preview_url))
                 stage2_ids.append(candidate.id)
             except Exception:
                 continue
@@ -256,7 +287,11 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="LocalShortsStudio Semantic Ranker", version="1.0", lifespan=lifespan)
+app = FastAPI(
+    title="LocalShortsStudio Semantic Ranker",
+    version="1.0",
+    lifespan=lifespan,
+)
 
 
 @app.get("/health")
@@ -278,7 +313,10 @@ def rank(request: RankRequest):
     try:
         return _rank(request)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"semantic ranking failed: {type(exc).__name__}: {exc}") from exc
+        raise HTTPException(
+            status_code=503,
+            detail=f"semantic ranking failed: {type(exc).__name__}: {exc}",
+        ) from exc
 
 
 if __name__ == "__main__":
