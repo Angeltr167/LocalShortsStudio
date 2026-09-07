@@ -22,6 +22,11 @@ replace_once(
     "import json\n",
     "",
 )
+replace_once(
+    "webui/pages/GPT_Visual_Review.py",
+    "from app.services import gpt_visual_review\n",
+    "from app.services import gpt_visual_review  # noqa: E402\n",
+)
 
 
 # ---------------------------------------------------------------------------
