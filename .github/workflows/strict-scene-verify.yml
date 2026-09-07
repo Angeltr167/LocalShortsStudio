@@ -1,0 +1,84 @@
+name: Verify Strict Scene Matching
+
+on:
+  push:
+    branches:
+      - feature/strict-scene-matching
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/strict-scene-matching
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Apply deterministic patch
+        run: python .github/scripts/apply_strict_scene_patch.py
+
+      - name: Inspect patch integrity
+        run: |
+          git diff --check
+          git diff --stat
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --python 3.11
+
+      - name: Compile changed Python sources
+        run: >-
+          uv run --no-sync python -m compileall
+          app/models/schema.py
+          app/services/material.py
+          app/services/strict_scene.py
+          app/services/task.py
+          webui/Main.py
+          test/services/test_strict_scene_matching.py
+
+      - name: Ruff changed Python sources
+        run: >-
+          uv run --no-sync ruff check
+          app/models/schema.py
+          app/services/material.py
+          app/services/strict_scene.py
+          app/services/task.py
+          webui/Main.py
+          test/services/test_strict_scene_matching.py
+
+      - name: Run focused regression tests
+        run: >-
+          uv run --no-sync python -X utf8 -m pytest -q
+          test/services/test_strict_scene_matching.py
+          test/services/test_material.py
+          test/services/test_task.py
+          test/services/test_schema.py
+
+      - name: Run full test suite
+        run: uv run --no-sync python -X utf8 -m pytest -q test
+
+      - name: Commit verified patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/models/schema.py app/services/material.py app/services/task.py \
+            webui/Main.py webui/i18n/en.json webui/i18n/es.json config.example.toml
+          git diff --cached --check
+          git commit -m "feat: add opt-in strict scene matching"
+          git push origin feature/strict-scene-matching
