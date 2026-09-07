@@ -336,3 +336,71 @@ def test_ranker_candidate_metrics_penalize_negative_visual_concept():
     assert metrics["positive_score"] == pytest.approx(0.8)
     assert metrics["negative_score"] == pytest.approx(0.6)
     assert metrics["score"] < metrics["positive_score"]
+
+
+
+def test_monotonic_narration_alignment_reaches_final_term_before_tiny_tail():
+    plan = strict_scene.build_scene_plan(
+        ["first", "middle", "closing"],
+        audio_duration=9.1,
+        max_clip_duration=3,
+    )
+    scores = [
+        [0.9, 0.1, 0.0],
+        [0.1, 0.9, 0.0],
+        [0.0, 0.1, 0.9],
+        [0.0, 0.0, 0.95],
+    ]
+    alignment = strict_scene._monotonic_alignment(scores, plan, 3)
+    assert alignment == [0, 1, 2, 2]
+    assert plan[-1]["duration"] == pytest.approx(0.1)
+
+
+def test_apply_narration_alignment_uses_real_subtitle_text(tmp_path):
+    subtitle_path = tmp_path / "narration.srt"
+    subtitle_path.write_text(
+        "1\n00:00:00,000 --> 00:00:02,900\nphone in bed\n\n"
+        "2\n00:00:03,000 --> 00:00:05,900\nwrite the task down\n\n",
+        encoding="utf-8",
+    )
+    plan = strict_scene.build_scene_plan(
+        ["checking smartphone", "writing notebook"],
+        audio_duration=6,
+        max_clip_duration=3,
+    )
+    with patch(
+        "app.services.strict_scene.semantic_ranker.align_scene_terms",
+        return_value=[[0.9, 0.1], [0.1, 0.9]],
+    ):
+        applied = strict_scene._apply_narration_alignment(
+            plan,
+            ["checking smartphone", "writing notebook"],
+            str(subtitle_path),
+            enabled=True,
+        )
+    assert applied is True
+    assert [scene["query_index"] for scene in plan] == [0, 1]
+    assert plan[0]["narration_text"] == "phone in bed"
+    assert plan[1]["narration_text"] == "write the task down"
+
+
+def test_alignment_service_returns_text_similarity_matrix(monkeypatch):
+    fake_features = [
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 0.0],
+        [0.0, 1.0],
+    ]
+    monkeypatch.setattr(ranker_service, "_encode_texts", lambda texts: fake_features)
+    monkeypatch.setattr(
+        ranker_service,
+        "_load_model",
+        lambda: {"model_name": "test", "pretrained": "unit", "device": "cpu"},
+    )
+    result = ranker_service._align(
+        ranker_service.AlignRequest(
+            scenes=["scene one", "scene two"],
+            terms=["term one", "term two"],
+        )
+    )
+    assert result["scores"] == [[1.0, 0.0], [0.0, 1.0]]

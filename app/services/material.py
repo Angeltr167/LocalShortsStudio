@@ -1682,6 +1682,7 @@ def download_videos(
     match_script_order: bool = False,
     strict_scene_matching: bool = False,
     semantic_scene_ranking: bool = False,
+    narration_subtitle_path: str = "",
 ) -> List[str]:
     provider = "pexels"
     remote_search_videos = search_videos_pexels
@@ -1786,6 +1787,7 @@ def download_videos(
             max_clip_duration=max_clip_duration,
             material_directory=material_directory,
             semantic_scene_ranking=semantic_scene_ranking,
+            narration_subtitle_path=narration_subtitle_path,
         )
 
     if match_script_order:

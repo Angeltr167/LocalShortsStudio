@@ -9,13 +9,14 @@ for every scene, and only reuses an asset when the provider has no usable altern
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from typing import Any, Callable, List
 
 from loguru import logger
 
 from app.models.schema import MaterialInfo, VideoAspect
-from app.services import semantic_ranker, task_artifacts
+from app.services import semantic_ranker, subtitle, task_artifacts
 
 SearchVideos = Callable[..., List[MaterialInfo]]
 SaveVideo = Callable[..., str]
@@ -78,11 +79,19 @@ def build_scene_plan(
                 "status": "pending",
             }
         )
-    # When audio needs more timeline slots than there are visual intents, the
-    # deterministic distribution creates adjacent repeats. Mark only the final
-    # slot of a repeated run as a semantic bridge toward the next narrative
-    # intent. Strict mode without semantic ranking keeps its existing behavior;
-    # the bridge metadata is consumed only by the semantic downloader path.
+    _mark_semantic_bridges(plan, terms)
+    return plan
+
+
+
+def _mark_semantic_bridges(
+    plan: list[dict[str, Any]],
+    terms: list[str],
+) -> None:
+    for scene in plan:
+        for key in ("bridge_to_query_index", "bridge_to_query", "bridge_query"):
+            scene.pop(key, None)
+
     run_start = 0
     while run_start < len(plan):
         run_query_index = int(plan[run_start]["query_index"])
@@ -103,10 +112,7 @@ def build_scene_plan(
                     terms[run_query_index],
                     terms[next_query_index],
                 )
-
         run_start = run_end
-
-    return plan
 
 
 def _build_bridge_query(
@@ -141,6 +147,166 @@ def _build_bridge_query(
         return shortened or value[:budget].strip()
 
     return f"{trim(current, current_budget)}; {trim(following, following_budget)}"
+
+
+
+_SRT_TIME_RE = re.compile(r"(?P<h>\d+):(?P<m>\d+):(?P<s>\d+),(?P<ms>\d+)")
+_MIN_MEANINGFUL_TAIL_SECONDS = 1.0
+_POSITION_PRIOR_WEIGHT = 0.08
+
+
+def _srt_time_seconds(value: str) -> float | None:
+    match = _SRT_TIME_RE.fullmatch(str(value or "").strip())
+    if not match:
+        return None
+    parts = {key: int(raw) for key, raw in match.groupdict().items()}
+    return (
+        parts["h"] * 3600
+        + parts["m"] * 60
+        + parts["s"]
+        + parts["ms"] / 1000.0
+    )
+
+
+def _subtitle_cues(subtitle_path: str) -> list[tuple[float, float, str]]:
+    cues: list[tuple[float, float, str]] = []
+    if not subtitle_path:
+        return cues
+    for _, times, text in subtitle.file_to_subtitles(subtitle_path):
+        try:
+            start_raw, end_raw = [part.strip() for part in times.split(" --> ", 1)]
+        except ValueError:
+            continue
+        start = _srt_time_seconds(start_raw)
+        end = _srt_time_seconds(end_raw)
+        narration = " ".join(str(text or "").split())
+        if start is None or end is None or end <= start or not narration:
+            continue
+        cues.append((start, end, narration))
+    return cues
+
+
+def _attach_narration_text(
+    scene_plan: list[dict[str, Any]],
+    subtitle_path: str,
+) -> list[str]:
+    cues = _subtitle_cues(subtitle_path)
+    scene_texts: list[str] = []
+    for scene in scene_plan:
+        start = float(scene["start"])
+        end = float(scene["end"])
+        overlapping = [
+            text
+            for cue_start, cue_end, text in cues
+            if cue_end > start and cue_start < end
+        ]
+        narration = " ".join(overlapping)
+        scene["narration_text"] = narration
+        scene_texts.append(narration)
+    return scene_texts
+
+
+def _monotonic_alignment(
+    scores: list[list[float]],
+    scene_plan: list[dict[str, Any]],
+    term_count: int,
+) -> list[int] | None:
+    """Choose a nondecreasing scene->term path with real closing-term exposure."""
+    scene_count = len(scene_plan)
+    if (
+        scene_count == 0
+        or term_count <= 0
+        or len(scores) != scene_count
+        or scene_count < term_count
+    ):
+        return None
+    if any(len(row) != term_count for row in scores):
+        return None
+
+    meaningful_end = scene_count - 1
+    if (
+        float(scene_plan[-1].get("duration") or 0) < _MIN_MEANINGFUL_TAIL_SECONDS
+        and scene_count > 1
+    ):
+        meaningful_end -= 1
+    active_count = meaningful_end + 1
+    if active_count < term_count:
+        return None
+
+    neg_inf = float("-inf")
+    dp = [[neg_inf] * term_count for _ in range(active_count)]
+    prev = [[-1] * term_count for _ in range(active_count)]
+
+    def weighted_score(scene_index: int, term_index: int) -> float:
+        reference_duration = max(float(scene_plan[0].get("duration") or 1), 0.001)
+        duration_weight = max(
+            0.15,
+            float(scene_plan[scene_index].get("duration") or 0) / reference_duration,
+        )
+        if active_count <= 1 or term_count <= 1:
+            position_prior = 1.0
+        else:
+            scene_position = scene_index / (active_count - 1)
+            term_position = term_index / (term_count - 1)
+            position_prior = 1.0 - abs(scene_position - term_position)
+        return (scores[scene_index][term_index] * duration_weight) + (
+            _POSITION_PRIOR_WEIGHT * position_prior
+        )
+
+    dp[0][0] = weighted_score(0, 0)
+    for scene_index in range(1, active_count):
+        for term_index in range(term_count):
+            for previous_term in (term_index, term_index - 1):
+                if previous_term < 0 or dp[scene_index - 1][previous_term] == neg_inf:
+                    continue
+                candidate = dp[scene_index - 1][previous_term] + weighted_score(
+                    scene_index, term_index
+                )
+                if candidate > dp[scene_index][term_index]:
+                    dp[scene_index][term_index] = candidate
+                    prev[scene_index][term_index] = previous_term
+
+    if dp[meaningful_end][term_count - 1] == neg_inf:
+        return None
+
+    alignment = [0] * active_count
+    current = term_count - 1
+    for scene_index in range(meaningful_end, -1, -1):
+        alignment[scene_index] = current
+        if scene_index > 0:
+            current = prev[scene_index][current]
+            if current < 0:
+                return None
+
+    alignment.extend([term_count - 1] * (scene_count - active_count))
+    return alignment
+
+
+def _apply_narration_alignment(
+    scene_plan: list[dict[str, Any]],
+    terms: list[str],
+    subtitle_path: str,
+    *,
+    enabled: bool,
+) -> bool:
+    scene_texts = _attach_narration_text(scene_plan, subtitle_path)
+    similarity = semantic_ranker.align_scene_terms(
+        scene_texts,
+        terms,
+        enabled=enabled,
+    )
+    if similarity is None:
+        return False
+    alignment = _monotonic_alignment(similarity, scene_plan, len(terms))
+    if alignment is None:
+        return False
+
+    for scene, term_index, row in zip(scene_plan, alignment, similarity):
+        scene["query_index"] = term_index
+        scene["query"] = terms[term_index]
+        scene["narration_aligned"] = True
+        scene["narration_alignment_score"] = round(float(row[term_index]), 6)
+    return True
 
 
 def _fallback_query_indexes(primary_index: int, query_count: int) -> list[int]:
@@ -180,6 +346,7 @@ def download_videos_by_scene_queries(
     max_clip_duration: int,
     material_directory: str,
     semantic_scene_ranking: bool = False,
+    narration_subtitle_path: str = "",
 ) -> List[str]:
     """Download one ordered stock clip per scene slot.
 
@@ -200,6 +367,19 @@ def download_videos_by_scene_queries(
     if not scene_plan:
         logger.warning("strict scene matching could not build a scene plan")
         return []
+
+    narration_aligned = _apply_narration_alignment(
+        scene_plan,
+        terms,
+        narration_subtitle_path,
+        enabled=semantic_scene_ranking,
+    )
+    if semantic_scene_ranking:
+        _mark_semantic_bridges(scene_plan, terms)
+    logger.info(
+        "strict scene narration alignment: "
+        f"enabled={semantic_scene_ranking}, applied={narration_aligned}"
+    )
 
     task_artifacts.patch_script_data(task_id, scene_plan=scene_plan)
     logger.info(

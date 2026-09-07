@@ -658,6 +658,7 @@ def get_video_materials(
     params,
     video_terms,
     audio_duration,
+    subtitle_path: str = "",
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
 ):
     if params.video_source == "local":
@@ -761,6 +762,9 @@ def get_video_materials(
                 match_script_order=params.match_materials_to_script,
                 strict_scene_matching=_strict_scene_matching_enabled(params),
                 semantic_scene_ranking=_semantic_scene_ranking_enabled(params),
+                narration_subtitle_path=(
+                    subtitle_path if _semantic_scene_ranking_enabled(params) else ""
+                ),
             )
         except volcengine_seedance.VolcEngineSeedanceError as exc:
             # 未确认状态和已生成但下载失败都对应一个可在方舟控制台恢复的远端
@@ -1506,6 +1510,7 @@ def _run_pipeline(
         params,
         video_terms,
         audio_duration,
+        subtitle_path=subtitle_path,
         loomloom_video_request=loomloom_video_request,
     )
     if not downloaded_videos:

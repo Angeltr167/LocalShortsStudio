@@ -178,6 +178,70 @@ def _local_session(base_url: str) -> requests.Session:
     return session
 
 
+
+def align_scene_terms(
+    scene_texts: list[str],
+    terms: list[str],
+    *,
+    enabled: bool,
+) -> list[list[float]] | None:
+    """Ask the local OpenCLIP service for scene-text -> visual-term similarities.
+
+    This is fail-open. Strict Scene Matching keeps its deterministic positional
+    assignment if the ranker is disabled, offline, or returns an invalid matrix.
+    """
+    normalized_scenes = [" ".join(str(value or "").split()) for value in scene_texts]
+    normalized_terms = [" ".join(str(value or "").split()) for value in terms]
+    if (
+        not enabled
+        or not normalized_scenes
+        or not normalized_terms
+        or not any(normalized_scenes)
+    ):
+        return None
+
+    base_url = _base_url()
+    try:
+        session = _local_session(base_url)
+        try:
+            response = session.post(
+                f"{base_url}/align",
+                json={"scenes": normalized_scenes, "terms": normalized_terms},
+                timeout=(_CONNECT_TIMEOUT_SECONDS, _READ_TIMEOUT_SECONDS),
+            )
+        finally:
+            session.close()
+        response.raise_for_status()
+        body = response.json()
+    except Exception as exc:
+        logger.warning(
+            "semantic narration alignment unavailable, keep positional scene plan: "
+            f"error={type(exc).__name__}, detail={exc}"
+        )
+        return None
+
+    scores = body.get("scores") if isinstance(body, dict) else None
+    if not isinstance(scores, list) or len(scores) != len(normalized_scenes):
+        logger.warning("semantic narration alignment returned an invalid matrix")
+        return None
+
+    matrix: list[list[float]] = []
+    for row in scores:
+        if not isinstance(row, list) or len(row) != len(normalized_terms):
+            return None
+        normalized_row: list[float] = []
+        for value in row:
+            try:
+                score = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if not math.isfinite(score):
+                return None
+            normalized_row.append(score)
+        matrix.append(normalized_row)
+    return matrix
+
+
 def rank_materials(
     query: str,
     items: List[MaterialInfo],

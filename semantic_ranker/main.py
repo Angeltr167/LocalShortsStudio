@@ -43,6 +43,13 @@ _model_bundle = None
 _model_error = None
 _embedding_cache_lock = threading.Lock()
 _embedding_cache: OrderedDict[str, list[float]] = OrderedDict()
+_metrics_lock = threading.Lock()
+_rank_requests_total = 0
+_align_requests_total = 0
+_last_rank_query = ""
+_last_rank_candidates = 0
+_last_align_scenes = 0
+_last_align_terms = 0
 
 
 class Candidate(BaseModel):
@@ -51,6 +58,11 @@ class Candidate(BaseModel):
         default_factory=list,
         max_length=MAX_PREVIEWS_PER_CANDIDATE,
     )
+
+
+class AlignRequest(BaseModel):
+    scenes: list[str] = Field(min_length=1, max_length=64)
+    terms: list[str] = Field(min_length=1, max_length=32)
 
 
 class RankRequest(BaseModel):
@@ -393,6 +405,30 @@ def _candidate_metrics(
     }
 
 
+
+def _align(request: AlignRequest) -> dict:
+    scene_texts = [" ".join(str(value or "").split()) for value in request.scenes]
+    term_texts = [" ".join(str(value or "").split()) for value in request.terms]
+    if not all(scene_texts) or not all(term_texts):
+        raise ValueError("alignment scenes and terms must be non-empty")
+
+    features = _encode_texts(scene_texts + term_texts)
+    if len(features) != len(scene_texts) + len(term_texts):
+        raise ValueError("alignment text encoding returned an unexpected shape")
+    scene_features = features[: len(scene_texts)]
+    term_features = features[len(scene_texts) :]
+    scores = [
+        [round(_dot(scene_feature, term_feature), 6) for term_feature in term_features]
+        for scene_feature in scene_features
+    ]
+    bundle = _load_model()
+    return {
+        "model": f"{bundle['model_name']}/{bundle['pretrained']}",
+        "device": bundle["device"],
+        "scores": scores,
+    }
+
+
 def _rank(request: RankRequest) -> dict:
     bundle = _load_model()
     positive_features = _encode_texts([request.query])
@@ -504,7 +540,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="LocalShortsStudio Semantic Ranker",
-    version="1.1",
+    version="1.2",
     lifespan=lifespan,
 )
 
@@ -514,6 +550,15 @@ def health():
     bundle = _model_bundle
     with _embedding_cache_lock:
         cache_entries = len(_embedding_cache)
+    with _metrics_lock:
+        metrics = {
+            "rank_requests_total": _rank_requests_total,
+            "align_requests_total": _align_requests_total,
+            "last_rank_query": _last_rank_query,
+            "last_rank_candidates": _last_rank_candidates,
+            "last_align_scenes": _last_align_scenes,
+            "last_align_terms": _last_align_terms,
+        }
     return {
         "status": "healthy" if bundle is not None else "initializing",
         "model_loaded": bundle is not None,
@@ -521,17 +566,40 @@ def health():
             f"{bundle['model_name']}/{bundle['pretrained']}" if bundle is not None else None
         ),
         "device": bundle.get("device") if bundle is not None else None,
-        "version": "1.1",
+        "version": "1.2",
         "negative_weight": _negative_weight(),
         "diversity_weight": _diversity_weight(),
         "diversity_threshold": _diversity_threshold(),
         "embedding_cache_entries": cache_entries,
+        **metrics,
         "error": _model_error,
     }
 
 
+
+@app.post("/align")
+def align(request: AlignRequest):
+    global _align_requests_total, _last_align_scenes, _last_align_terms
+    with _metrics_lock:
+        _align_requests_total += 1
+        _last_align_scenes = len(request.scenes)
+        _last_align_terms = len(request.terms)
+    try:
+        return _align(request)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"semantic alignment failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+
 @app.post("/rank")
 def rank(request: RankRequest):
+    global _rank_requests_total, _last_rank_query, _last_rank_candidates
+    with _metrics_lock:
+        _rank_requests_total += 1
+        _last_rank_query = request.query
+        _last_rank_candidates = len(request.candidates)
     try:
         return _rank(request)
     except Exception as exc:
