@@ -1,0 +1,85 @@
+name: Verify Narration Aware Scene Alignment
+
+on:
+  push:
+    branches:
+      - feature/narration-aware-scene-alignment
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Apply narration alignment patch
+        run: python .github/scripts/apply_narration_alignment_patch.py
+
+      - name: Inspect patch integrity
+        run: |
+          git diff --check
+          git diff -- app/services/task.py app/services/material.py app/services/semantic_ranker.py app/services/strict_scene.py semantic_ranker/main.py test/services/test_semantic_scene_ranking.py
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --python 3.11
+
+      - name: Compile changed sources
+        run: >-
+          uv run --no-sync python -m compileall
+          app/services/task.py
+          app/services/material.py
+          app/services/semantic_ranker.py
+          app/services/strict_scene.py
+          semantic_ranker/main.py
+          test/services/test_semantic_scene_ranking.py
+
+      - name: Ruff changed sources
+        run: >-
+          uv run --no-sync ruff check
+          app/services/task.py
+          app/services/material.py
+          app/services/semantic_ranker.py
+          app/services/strict_scene.py
+          semantic_ranker/main.py
+          test/services/test_semantic_scene_ranking.py
+
+      - name: Run focused regression tests
+        run: >-
+          uv run --no-sync python -X utf8 -m pytest -q
+          test/services/test_semantic_scene_ranking.py
+          test/services/test_strict_scene_matching.py
+          test/services/test_material.py
+          test/services/test_task.py
+
+      - name: Run full test suite
+        run: uv run --no-sync python -X utf8 -m pytest -q test
+
+      - name: Commit verified narration alignment
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/services/task.py app/services/material.py app/services/semantic_ranker.py app/services/strict_scene.py semantic_ranker/main.py test/services/test_semantic_scene_ranking.py
+          if git diff --cached --quiet; then
+            echo "No implementation changes to commit"
+            exit 0
+          fi
+          git commit -m "feat: align strict scenes to narration timing"
+          git push origin HEAD:feature/narration-aware-scene-alignment
