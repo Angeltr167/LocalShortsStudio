@@ -23,13 +23,23 @@ test_path = Path("test/services/test_material_cache.py")
 test_text = test_path.read_text(encoding="utf-8")
 
 needle = '''                "rendition": {\n                    "id": "large",\n                    "width": 1080,\n                    "height": 1920,\n                },\n            },\n'''
-replacement = '''                "rendition": {\n                    "id": "large",\n                    "width": 1080,\n                    "height": 1920,\n                },\n                "preview_images": [\n                    "https://cdn.pixabay.com/video/2026/09/07/preview.jpg?token=drop",\n                ],\n            },\n'''
+replacement = '''                "rendition": {\n                    "id": "large",\n                    "width": 1080,\n                    "height": 1920,\n                },\n                "preview_images": [\n                    "https://cdn.pixabay.com/video/2026/09/07/preview.jpg",\n                ],\n            },\n'''
 assert needle in test_text, "test material fixture marker not found"
 test_text = test_text.replace(needle, replacement, 1)
 
 needle = '''        self.assertEqual(\n            loaded[0].source_info["creator"]["profile_page"],\n            "https://pixabay.com/users/creator-456/",\n        )\n\n    def test_expired_cache_is_removed_and_treated_as_miss(self):\n'''
 replacement = '''        self.assertEqual(\n            loaded[0].source_info["creator"]["profile_page"],\n            "https://pixabay.com/users/creator-456/",\n        )\n        self.assertEqual(\n            loaded[0].source_info["preview_images"],\n            ["https://cdn.pixabay.com/video/2026/09/07/preview.jpg"],\n        )\n\n    def test_expired_cache_is_removed_and_treated_as_miss(self):\n'''
 assert needle in test_text, "round-trip assertion marker not found"
+test_text = test_text.replace(needle, replacement, 1)
+
+needle = '''        item = self._item()\n        item.source_info["source_page"] += "?token=drop"\n        item.source_info["creator"]["profile_page"] += "?key=drop"\n'''
+replacement = '''        item = self._item()\n        item.source_info["source_page"] += "?token=drop"\n        item.source_info["creator"]["profile_page"] += "?key=drop"\n        item.source_info["preview_images"] = [\n            "https://cdn.pixabay.com/video/2026/09/07/preview.jpg?preview_token=drop"\n        ]\n'''
+assert needle in test_text, "credential cache test marker not found"
+test_text = test_text.replace(needle, replacement, 1)
+
+needle = '''        self.assertNotIn("private search term", raw_payload)\n        self.assertNotIn("token=drop", raw_payload)\n\n    def test_coverr_signed_urls_are_never_cached(self):\n'''
+replacement = '''        self.assertNotIn("private search term", raw_payload)\n        self.assertNotIn("token=drop", raw_payload)\n        self.assertEqual(\n            payload["items"][0]["source_info"]["preview_images"],\n            ["https://cdn.pixabay.com/video/2026/09/07/preview.jpg"],\n        )\n\n    def test_coverr_signed_urls_are_never_cached(self):\n'''
+assert needle in test_text, "credential cache assertion marker not found"
 test_text = test_text.replace(needle, replacement, 1)
 
 needle = '''    def test_cache_key_separates_provider_duration_and_aspect(self):\n'''
