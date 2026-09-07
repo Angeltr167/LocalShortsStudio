@@ -1,7 +1,7 @@
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from app.models.schema import MaterialInfo, VideoParams
+from app.models.schema import MaterialInfo, VideoAspect, VideoParams
 from app.services import semantic_ranker, strict_scene, task
 from semantic_ranker import main as ranker_service
 
@@ -103,7 +103,7 @@ def test_strict_scene_uses_semantic_candidate_order_when_enabled():
             source_record=lambda item, path: {"asset_id": item.source_info["asset_id"]},
             persist_sources=lambda task_id, sources: None,
             redact_error=lambda error, secret: str(error).replace(secret, "***"),
-            video_aspect=ranker_service.VideoAspect.portrait if hasattr(ranker_service, "VideoAspect") else __import__("app.models.schema", fromlist=["VideoAspect"]).VideoAspect.portrait,
+            video_aspect=VideoAspect.portrait,
             audio_duration=3,
             max_clip_duration=3,
             material_directory="/tmp",
