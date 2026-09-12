@@ -35,6 +35,11 @@ replace_once(
 # ---------------------------------------------------------------------------
 replace_once(
     "app/services/task.py",
+    """import re\nimport socket\n""",
+    """import re\nimport shutil\nimport socket\n""",
+)
+replace_once(
+    "app/services/task.py",
     """    elevenlabs_music,\n    llm,\n    loomloom,\n""",
     """    cartoon_engine,\n    elevenlabs_music,\n    llm,\n    loomloom,\n""",
 )
@@ -65,8 +70,8 @@ replace_once(
 )
 replace_once(
     "app/services/task.py",
-    """            clip_speed=params.video_clip_speed,\n""",
-    """            clip_speed=clip_speed,\n""",
+    """        logger.info(f\"\\n\\n## combining video: {index} => {combined_video_path}\")\n        video.combine_videos(\n            combined_video_path=combined_video_path,\n            video_paths=downloaded_videos,\n            audio_file=audio_file,\n            video_aspect=params.video_aspect,\n            video_fit_mode=params.video_fit_mode,\n            video_concat_mode=video_concat_mode,\n            video_transition_mode=video_transition_mode,\n            max_clip_duration=params.video_clip_duration,\n            threads=params.n_threads,\n            clip_speed=params.video_clip_speed,\n        )\n""",
+    """        logger.info(f\"\\n\\n## combining video: {index} => {combined_video_path}\")\n        if params.video_source == \"ai_cartoon\":\n            # The procedural renderer already emits one exact full-length timeline.\n            # Sending it through combine_videos() would split at video_clip_duration\n            # and, in sequential mode, keep only the first segment before looping it.\n            if len(downloaded_videos) != 1 or not path.isfile(downloaded_videos[0]):\n                raise cartoon_engine.CartoonRenderError(\n                    \"AI cartoon mode requires exactly one rendered timeline material\"\n                )\n            shutil.copy2(downloaded_videos[0], combined_video_path)\n        else:\n            video.combine_videos(\n                combined_video_path=combined_video_path,\n                video_paths=downloaded_videos,\n                audio_file=audio_file,\n                video_aspect=params.video_aspect,\n                video_fit_mode=params.video_fit_mode,\n                video_concat_mode=video_concat_mode,\n                video_transition_mode=video_transition_mode,\n                max_clip_duration=params.video_clip_duration,\n                threads=params.n_threads,\n                clip_speed=clip_speed,\n            )\n""",
 )
 
 
@@ -107,6 +112,11 @@ replace_once(
     "webui/Main.py",
     """            params.video_clip_speed = st.slider(\n                tr(\"Clip Speed\"),\n                min_value=0.5,\n                max_value=2.0,\n                step=0.05,\n                format=\"%.2fx\",\n                key=clip_speed_key,\n                help=tr(\"Clip Speed Help\"),\n            )\n""",
     """            if params.video_source == \"ai_cartoon\":\n                st.session_state[clip_speed_key] = 1.0\n            params.video_clip_speed = st.slider(\n                tr(\"Clip Speed\"),\n                min_value=0.5,\n                max_value=2.0,\n                step=0.05,\n                format=\"%.2fx\",\n                key=clip_speed_key,\n                help=(\n                    \"Cartoon timing is locked to the narration.\"\n                    if params.video_source == \"ai_cartoon\"\n                    else tr(\"Clip Speed Help\")\n                ),\n                disabled=params.video_source == \"ai_cartoon\",\n            )\n""",
+)
+replace_once(
+    "webui/Main.py",
+    """            video_count_options = [1, 2, 3, 4, 5]\n            params.video_count = stable_selectbox(\n""",
+    """            video_count_options = (\n                [1] if params.video_source == \"ai_cartoon\" else [1, 2, 3, 4, 5]\n            )\n            params.video_count = stable_selectbox(\n""",
 )
 replace_once(
     "webui/Main.py",
