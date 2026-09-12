@@ -119,6 +119,11 @@ class VideoParams(BaseModel):
     # Optional local OpenCLIP reranking of stock preview images. This only
     # changes candidate ordering inside Strict Scene Matching.
     semantic_scene_ranking: bool = False
+    # Local procedural 2D animation mode. The LLM only chooses from a bounded
+    # scene vocabulary; drawing/rendering remains deterministic and local.
+    cartoon_ai_director: bool = True
+    cartoon_lip_sync: Literal["auto", "heuristic", "rhubarb"] = "auto"
+    cartoon_fps: int = Field(default=24, ge=12, le=30)
     video_count: int = Field(default=1, ge=1)
 
     video_source: Optional[str] = "pexels"

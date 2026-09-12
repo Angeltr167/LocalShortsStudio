@@ -109,6 +109,7 @@ LOOMLOOM_MAX_POLL_FAILURES = 5
 # 不改变 config.toml、历史任务和 API 请求中的字段语义，旧用户无需迁移配置。
 VIDEO_SOURCE_GROUPS = {
     "stock_video": ("pexels", "pixabay", "coverr"),
+    "animation": ("ai_cartoon",),
     "ai_video": (
         "metaso_minimax",
         "loomloom",
@@ -4507,6 +4508,7 @@ def _render_video_settings(panel, params):
                 "metaso_minimax": tr("Metaso MiniMax H3"),
                 "loomloom": tr("Shengsuan Cloud AI Video"),
                 "openai_image": tr("OpenAI Compatible Text-to-Image"),
+                "ai_cartoon": "AI Cartoon · Doodle Podcast",
                 "local": tr("Local file"),
             }
             saved_video_source_name = str(
@@ -4516,6 +4518,7 @@ def _render_video_settings(panel, params):
                 tr("Video Source"),
                 groups=(
                     (tr("Stock Video"), VIDEO_SOURCE_GROUPS["stock_video"]),
+                    ("AI Animation", VIDEO_SOURCE_GROUPS["animation"]),
                     (tr("AI Video"), VIDEO_SOURCE_GROUPS["ai_video"]),
                     (tr("AI Image"), VIDEO_SOURCE_GROUPS["ai_image"]),
                     (tr("Local Material"), VIDEO_SOURCE_GROUPS["local"]),
@@ -4536,6 +4539,12 @@ def _render_video_settings(panel, params):
                 st.caption(tr("OFox AI Video Help"))
             if params.video_source == "metaso_minimax":
                 st.caption(tr("Metaso MiniMax H3 Help"))
+            if params.video_source == "ai_cartoon":
+                st.caption(
+                    "Local 2D animation: the configured LLM directs scenes while an "
+                    "original procedural doodle renderer keeps characters consistent. "
+                    "No stock-footage or text-to-video API is used. Video keywords are ignored."
+                )
             if params.video_source == "local":
                 # Streamlit 的文件类型校验对扩展名大小写敏感，这里同时放行大小写两种形式。
                 local_file_types = sorted(
@@ -4554,6 +4563,8 @@ def _render_video_settings(panel, params):
             # 顺序拼接是唯一符合实际执行逻辑的选项。同步控件值可避免界面仍显示
             # “随机拼接”，同时保留用户原选择，关闭后自动恢复。
             sync_script_order_concat_mode()
+            if params.video_source == "ai_cartoon":
+                st.session_state["video_concat_mode_select"] = VideoConcatMode.sequential.value
             selected_concat_mode = stable_selectbox(
                 tr("Video Concat Mode"),
                 options=[value for _, value in video_concat_modes],
@@ -4569,6 +4580,7 @@ def _render_video_settings(panel, params):
                 disabled=bool(
                     st.session_state.get("match_materials_to_script", False)
                     or st.session_state.get("strict_scene_matching", False)
+                    or params.video_source == "ai_cartoon"
                 ),
             )
             params.video_concat_mode = VideoConcatMode(selected_concat_mode)
@@ -4576,6 +4588,12 @@ def _render_video_settings(panel, params):
             strict_scene_supported = (
                 params.video_source in VIDEO_SOURCE_GROUPS["stock_video"]
             )
+            if params.video_source == "ai_cartoon":
+                # Stock-order controls do not participate in the procedural animation
+                # timeline. Clear stale session values when switching sources.
+                st.session_state["match_materials_to_script"] = False
+                st.session_state["strict_scene_matching"] = False
+                st.session_state["semantic_scene_ranking"] = False
             if (
                 not strict_scene_supported
                 and st.session_state.get("strict_scene_matching", False)
@@ -4588,7 +4606,10 @@ def _render_video_settings(panel, params):
                 help=tr("Match Materials to Script Order Help"),
                 key="match_materials_to_script",
                 on_change=sync_script_order_concat_mode,
-                disabled=bool(st.session_state.get("strict_scene_matching", False)),
+                disabled=bool(
+                    st.session_state.get("strict_scene_matching", False)
+                    or params.video_source == "ai_cartoon"
+                ),
             )
             params.strict_scene_matching = st.checkbox(
                 tr("Strict Scene Matching"),
@@ -4650,6 +4671,8 @@ def _render_video_settings(panel, params):
                 (tr("ZoomIn"), VideoTransitionMode.zoom_in.value),
                 (tr("ZoomOut"), VideoTransitionMode.zoom_out.value),
             ]
+            if params.video_source == "ai_cartoon":
+                st.session_state["video_transition_mode_select"] = VideoTransitionMode.none.value
             selected_transition_mode = stable_selectbox(
                 tr("Video Transition Mode"),
                 options=[value for _, value in video_transition_modes],
@@ -4662,6 +4685,12 @@ def _render_video_settings(panel, params):
                 format_func=lambda value: dict(
                     (v, label) for label, v in video_transition_modes
                 )[value],
+                disabled=params.video_source == "ai_cartoon",
+                help=(
+                    "Scene changes are authored inside the cartoon timeline."
+                    if params.video_source == "ai_cartoon"
+                    else None
+                ),
             )
             params.video_transition_mode = VideoTransitionMode(selected_transition_mode)
             _set_runtime_config(
@@ -4745,7 +4774,12 @@ def _render_video_settings(panel, params):
                     5 if params.video_source == "metaso_minimax" else 3,
                 ),
                 key="video_clip_duration_select",
-                help=tr("Clip Duration Help"),
+                help=(
+                    "Not used by AI Cartoon; narration timing controls scene duration."
+                    if params.video_source == "ai_cartoon"
+                    else tr("Clip Duration Help")
+                ),
+                disabled=params.video_source == "ai_cartoon",
             )
             _set_runtime_config(
                 "ui", "video_clip_duration", params.video_clip_duration
@@ -4760,6 +4794,8 @@ def _render_video_settings(panel, params):
                     _saved_ui_number("video_clip_speed", 1.0, 0.5, 2.0),
                 )
             )
+            if params.video_source == "ai_cartoon":
+                st.session_state[clip_speed_key] = 1.0
             params.video_clip_speed = st.slider(
                 tr("Clip Speed"),
                 min_value=0.5,
@@ -4767,10 +4803,17 @@ def _render_video_settings(panel, params):
                 step=0.05,
                 format="%.2fx",
                 key=clip_speed_key,
-                help=tr("Clip Speed Help"),
+                help=(
+                    "Cartoon timing is locked to the narration."
+                    if params.video_source == "ai_cartoon"
+                    else tr("Clip Speed Help")
+                ),
+                disabled=params.video_source == "ai_cartoon",
             )
             _set_runtime_config("ui", "video_clip_speed", params.video_clip_speed)
-            video_count_options = [1, 2, 3, 4, 5]
+            video_count_options = (
+                [1] if params.video_source == "ai_cartoon" else [1, 2, 3, 4, 5]
+            )
             params.video_count = stable_selectbox(
                 tr("Number of Videos Generated Simultaneously"),
                 options=video_count_options,
@@ -4825,7 +4868,64 @@ def _render_video_settings(panel, params):
                 _render_ofox_video_settings(params)
             if params.video_source == "metaso_minimax":
                 _render_metaso_minimax_video_settings(params)
+            if params.video_source == "ai_cartoon":
+                _render_ai_cartoon_settings(params)
     return uploaded_files
+
+
+def _render_ai_cartoon_settings(params):
+    """Controls for the local procedural doodle animation source."""
+    st.markdown("**AI Cartoon Director**")
+    params.cartoon_ai_director = st.checkbox(
+        "Use configured LLM as scene director",
+        value=_saved_ui_bool("cartoon_ai_director", True),
+        key="cartoon_ai_director",
+        help=(
+            "The LLM chooses only validated layouts, expressions and explanatory "
+            "overlays. If it fails, LocalShortsStudio automatically uses a deterministic plan."
+        ),
+    )
+    _set_runtime_config("ui", "cartoon_ai_director", params.cartoon_ai_director)
+
+    lip_options = ["auto", "heuristic", "rhubarb"]
+    params.cartoon_lip_sync = stable_selectbox(
+        "Lip sync",
+        options=lip_options,
+        default_value=_saved_ui_choice("cartoon_lip_sync", lip_options, "auto"),
+        key="cartoon_lip_sync_select",
+        format_func=lambda value: {
+            "auto": "Auto (Rhubarb when installed, local fallback otherwise)",
+            "heuristic": "Built-in local mouth animation",
+            "rhubarb": "Require Rhubarb phoneme lip sync",
+        }[value],
+    )
+    _set_runtime_config("ui", "cartoon_lip_sync", params.cartoon_lip_sync)
+
+    fps_options = [18, 24, 30]
+    params.cartoon_fps = stable_selectbox(
+        "Cartoon FPS",
+        options=fps_options,
+        default_value=_saved_ui_choice("cartoon_fps", fps_options, 24),
+        key="cartoon_fps_select",
+        help="24 FPS is recommended. 18 FPS is faster; 30 FPS is smoother but heavier.",
+    )
+    _set_runtime_config("ui", "cartoon_fps", params.cartoon_fps)
+
+    rhubarb_path = st.text_input(
+        "Rhubarb executable (optional)",
+        value=str(config.app.get("rhubarb_path", "") or ""),
+        placeholder=r"C:\Tools\rhubarb\rhubarb.exe",
+        help=(
+            "Leave blank for the built-in lip-sync fallback. In Auto mode a configured "
+            "Rhubarb binary is detected automatically."
+        ),
+        key="rhubarb_path_input",
+    )
+    _set_runtime_config("app", "rhubarb_path", rhubarb_path.strip())
+    st.caption(
+        "The first version uses an original midnight-podcast doodle set with two stable "
+        "characters, microphones, reactions and animated concept cards."
+    )
 
 
 def _render_wavespeed_video_settings(params):

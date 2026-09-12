@@ -1,6 +1,7 @@
 import math
 import os
 import re
+import shutil
 import socket
 import threading
 import time
@@ -16,6 +17,7 @@ from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
 from app.services import bgm as bgm_service
 from app.services import (
+    cartoon_engine,
     elevenlabs_music,
     llm,
     loomloom,
@@ -660,7 +662,24 @@ def get_video_materials(
     audio_duration,
     subtitle_path: str = "",
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
+    video_script: str = "",
+    audio_file: str = "",
 ):
+    if params.video_source == "ai_cartoon":
+        logger.info("\n\n## rendering local AI-directed cartoon material")
+        try:
+            cartoon_file = cartoon_engine.render_cartoon_material(
+                task_id=task_id,
+                params=params,
+                video_script=video_script,
+                audio_file=audio_file,
+                audio_duration=audio_duration,
+                subtitle_path=subtitle_path,
+            )
+        except cartoon_engine.CartoonRenderError as exc:
+            _mark_task_failed(task_id, "materials", str(exc))
+            return None
+        return [cartoon_file] if cartoon_file else None
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
         materials = video.preprocess_video(
@@ -878,13 +897,20 @@ def generate_final_videos(
     )
     # 多视频生成默认会打散素材以增加差异；但“按文案顺序匹配素材”追求的是
     # 时间线稳定性和可解释性，所以开启后所有输出都使用顺序拼接。
-    if params.match_materials_to_script or _strict_scene_matching_enabled(params):
+    if params.video_source == "ai_cartoon":
+        # The material already contains the narration-aware animation timeline.
+        # Randomization, transitions or clip-speed changes would destroy sync.
+        video_concat_mode = VideoConcatMode.sequential
+    elif params.match_materials_to_script or _strict_scene_matching_enabled(params):
         video_concat_mode = VideoConcatMode.sequential
     elif params.video_count == 1:
         video_concat_mode = params.video_concat_mode
     else:
         video_concat_mode = VideoConcatMode.random
-    video_transition_mode = params.video_transition_mode
+    video_transition_mode = (
+        None if params.video_source == "ai_cartoon" else params.video_transition_mode
+    )
+    clip_speed = 1.0 if params.video_source == "ai_cartoon" else params.video_clip_speed
 
     _progress = 50
     for i in range(params.video_count):
@@ -893,18 +919,28 @@ def generate_final_videos(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
         logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
-        video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_fit_mode=params.video_fit_mode,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-            clip_speed=params.video_clip_speed,
-        )
+        if params.video_source == "ai_cartoon":
+            # The procedural renderer already emits one exact full-length timeline.
+            # Sending it through combine_videos() would split at video_clip_duration
+            # and, in sequential mode, keep only the first segment before looping it.
+            if len(downloaded_videos) != 1 or not path.isfile(downloaded_videos[0]):
+                raise cartoon_engine.CartoonRenderError(
+                    "AI cartoon mode requires exactly one rendered timeline material"
+                )
+            shutil.copy2(downloaded_videos[0], combined_video_path)
+        else:
+            video.combine_videos(
+                combined_video_path=combined_video_path,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                video_fit_mode=params.video_fit_mode,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+                clip_speed=clip_speed,
+            )
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
@@ -1443,7 +1479,7 @@ def _run_pipeline(
 
     # 2. Generate terms
     video_terms = ""
-    if params.video_source != "local":
+    if params.video_source not in {"local", "ai_cartoon"}:
         video_terms = generate_terms(task_id, params, video_script)
         if not video_terms:
             return _mark_task_failed(
@@ -1512,6 +1548,8 @@ def _run_pipeline(
         audio_duration,
         subtitle_path=subtitle_path,
         loomloom_video_request=loomloom_video_request,
+        video_script=video_script,
+        audio_file=audio_file,
     )
     if not downloaded_videos:
         return _mark_task_failed(
