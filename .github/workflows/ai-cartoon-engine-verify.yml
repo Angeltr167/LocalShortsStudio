@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ai-cartoon-engine-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   apply-test-commit:
     # The verified job commits the integrated implementation back to this branch.
