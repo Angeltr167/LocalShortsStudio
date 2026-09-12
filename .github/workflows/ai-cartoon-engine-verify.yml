@@ -1,0 +1,95 @@
+name: Verify AI Cartoon Engine
+
+on:
+  push:
+    branches:
+      - feature/ai-cartoon-engine
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Apply AI cartoon integration patch
+        run: python .github/scripts/apply_ai_cartoon_engine_patch.py
+
+      - name: Inspect patch integrity
+        run: |
+          git diff --check
+          grep -q 'ai_cartoon' app/models/schema.py
+          grep -q 'generate_cartoon_direction' app/services/llm.py
+          grep -q 'render_cartoon_material' app/services/task.py
+          grep -q 'AI Cartoon · Doodle Podcast' webui/Main.py
+          grep -q 'MAX_RETRY_ROUNDS = 3' app/services/gpt_visual_review.py
+          git diff -- app/models/schema.py app/services/llm.py app/services/task.py webui/Main.py
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --python 3.11
+
+      - name: Compile changed sources
+        run: >-
+          uv run --no-sync python -m compileall -q
+          app/services/cartoon_engine.py
+          app/models/schema.py
+          app/services/llm.py
+          app/services/task.py
+          webui/Main.py
+          test/services/test_cartoon_engine.py
+
+      - name: Ruff changed sources
+        run: >-
+          uv run --no-sync ruff check
+          app/services/cartoon_engine.py
+          app/models/schema.py
+          app/services/llm.py
+          app/services/task.py
+          webui/Main.py
+          test/services/test_cartoon_engine.py
+
+      - name: Run focused cartoon tests
+        run: >-
+          uv run --no-sync python -X utf8 -m pytest -q
+          test/services/test_cartoon_engine.py
+          test/services/test_task.py
+          test/services/test_llm.py
+
+      - name: Run full test suite
+        run: uv run --no-sync python -X utf8 -m pytest -q test
+
+      - name: Commit verified AI cartoon engine
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            app/services/cartoon_engine.py \
+            app/models/schema.py \
+            app/services/llm.py \
+            app/services/task.py \
+            webui/Main.py \
+            test/services/test_cartoon_engine.py
+          if git diff --cached --quiet; then
+            echo "No implementation changes to commit"
+            exit 0
+          fi
+          git commit -m "feat: add AI-directed procedural cartoon mode"
+          git push origin HEAD:feature/ai-cartoon-engine
