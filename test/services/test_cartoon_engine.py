@@ -79,8 +79,8 @@ def test_invalid_ai_director_response_fails_open_to_deterministic_plan():
         return_value="not-json",
     ):
         scenes, director = cartoon_engine.build_cartoon_plan(
-            subject="focus",
-            script="Notifications pull your attention away.",
+            subject="phone distractions",
+            script="Phone notifications keep interrupting your work.",
             audio_duration=3.0,
             ai_director=True,
         )
