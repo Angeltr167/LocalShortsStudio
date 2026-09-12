@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.models.schema import VideoParams
-from app.services import cartoon_engine
+from app.services import cartoon_engine, task
 
 
 def test_parse_srt_cues(tmp_path):
@@ -115,6 +115,33 @@ def test_rhubarb_payload_parser_rejects_unknown_shapes():
         }
     )
     assert [cue.value for cue in cues] == ["A", "X"]
+
+
+def test_get_video_materials_routes_cartoon_source_to_local_renderer():
+    params = VideoParams(
+        video_subject="focus",
+        video_script="Focus on one task.",
+        video_source="ai_cartoon",
+        cartoon_ai_director=False,
+    )
+    with patch(
+        "app.services.task.cartoon_engine.render_cartoon_material",
+        return_value="C:/task/cartoon-material.mp4",
+    ) as render:
+        result = task.get_video_materials(
+            task_id="task-1",
+            params=params,
+            video_terms="",
+            audio_duration=7,
+            subtitle_path="C:/task/subtitle.srt",
+            video_script=params.video_script,
+            audio_file="C:/task/audio.mp3",
+        )
+    assert result == ["C:/task/cartoon-material.mp4"]
+    render.assert_called_once()
+    call = render.call_args.kwargs
+    assert call["video_script"] == params.video_script
+    assert call["audio_file"].endswith("audio.mp3")
 
 
 def test_render_cartoon_material_writes_plan_storyboard_and_material(tmp_path):
