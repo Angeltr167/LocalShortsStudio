@@ -108,6 +108,7 @@ def test_grouped_video_source_keeps_groups_and_accessible_label_binding():
         assert data["controlId"] == "video_source_select_en_control"
         assert [group["label"] for group in data["groups"]] == [
             "Stock Video",
+            "AI Animation",
             "AI Video",
             "AI Image",
             "Local Files",
@@ -118,6 +119,7 @@ def test_grouped_video_source_keeps_groups_and_accessible_label_binding():
             "pexels",
             "pixabay",
             "coverr",
+            "ai_cartoon",
             "metaso_minimax",
             "loomloom",
             "volcengine_seedance",
