@@ -38,6 +38,7 @@ jobs:
         run: |
           python .github/scripts/apply_ai_cartoon_engine_patch.py
           python .github/scripts/apply_ai_cartoon_ollama_director_patch.py
+          python .github/scripts/apply_ai_cartoon_ui_polish_patch.py
 
       - name: Inspect patch integrity
         run: |
@@ -61,7 +62,13 @@ jobs:
                   'params.video_source == "ai_cartoon"',
                   "shutil.copy2(downloaded_videos[0], combined_video_path)",
               ),
-              "webui/Main.py": ('"ai_cartoon"', "AI Cartoon", "Lip sync"),
+              "webui/Main.py": (
+                  '"ai_cartoon"',
+                  "AI Cartoon",
+                  "Lip sync",
+                  "Scene changes are authored inside the cartoon timeline.",
+                  "narration timing controls scene duration",
+              ),
               "app/services/gpt_visual_review.py": ("MAX_RETRY_ROUNDS = 3",),
           }
           for path, needles in checks.items():
