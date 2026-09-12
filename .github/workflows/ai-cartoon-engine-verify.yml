@@ -36,11 +36,23 @@ jobs:
       - name: Inspect patch integrity
         run: |
           git diff --check
-          grep -q 'ai_cartoon' app/models/schema.py
-          grep -q 'generate_cartoon_direction' app/services/llm.py
-          grep -q 'render_cartoon_material' app/services/task.py
-          grep -q 'AI Cartoon · Doodle Podcast' webui/Main.py
-          grep -q 'MAX_RETRY_ROUNDS = 3' app/services/gpt_visual_review.py
+          python - <<'PY'
+          from pathlib import Path
+
+          checks = {
+              "app/models/schema.py": ("cartoon_ai_director", "cartoon_lip_sync", "cartoon_fps"),
+              "app/services/llm.py": ("def generate_cartoon_direction",),
+              "app/services/task.py": ("cartoon_engine.render_cartoon_material", 'params.video_source == "ai_cartoon"'),
+              "webui/Main.py": ('"ai_cartoon"', "AI Cartoon"),
+              "app/services/gpt_visual_review.py": ("MAX_RETRY_ROUNDS = 3",),
+          }
+          for path, needles in checks.items():
+              text = Path(path).read_text(encoding="utf-8")
+              for needle in needles:
+                  if needle not in text:
+                      raise SystemExit(f"missing expected integration marker {needle!r} in {path}")
+          print("cartoon integration markers verified")
+          PY
           git diff -- app/models/schema.py app/services/llm.py app/services/task.py webui/Main.py
 
       - name: Install locked dependencies
