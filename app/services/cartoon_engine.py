@@ -56,6 +56,8 @@ MAX_OVERLAY_TEXT = 42
 
 _LAYOUTS = frozenset({"host", "guest", "two_shot", "graphic"})
 _SPEAKERS = frozenset({"host", "guest"})
+_ACTORS = frozenset({"host", "guest", "none"})
+_ACTOR_ROLES = frozenset({"narrator", "focus", "reaction", "offscreen"})
 _EMOTIONS = frozenset({"neutral", "thinking", "surprised", "happy", "concerned"})
 _ACTIONS = frozenset({"talk", "explain", "point", "think", "react", "write"})
 _OVERLAYS = frozenset(
@@ -112,6 +114,10 @@ class CartoonScene:
     state_before: str = "neutral"
     state_after: str = "neutral"
     continuity_object: str = ""
+    narration_actor: str = "host"
+    visual_actor: str = "host"
+    actor_role: str = "narrator"
+    supporting_character: str = "guest"
 
     @property
     def duration(self) -> float:
@@ -138,6 +144,10 @@ class CartoonScene:
             "state_before": self.state_before,
             "state_after": self.state_after,
             "continuity_object": self.continuity_object,
+            "narration_actor": self.narration_actor,
+            "visual_actor": self.visual_actor,
+            "actor_role": self.actor_role,
+            "supporting_character": self.supporting_character,
         }
 
 
@@ -408,6 +418,8 @@ def _fallback_scene(cue: NarrationCue, index: int, previous_state: str = "neutra
     if template != "explain_generic":
         spec = cartoon_director.TEMPLATES[template]
         overlay, action = spec.overlay, spec.pose
+    visual_actor = "guest" if layout == "guest" else "host"
+    actor_role = "reaction" if visual_actor == "guest" else "narrator"
     return CartoonScene(
         scene=index + 1,
         start=cue.start,
@@ -422,6 +434,10 @@ def _fallback_scene(cue: NarrationCue, index: int, previous_state: str = "neutra
         accent_text=_short_keyword(cue.text, ""),
         timing_source=cue.timing_source,
         **fields,
+        narration_actor="host",
+        visual_actor=visual_actor,
+        actor_role=actor_role,
+        supporting_character="guest" if visual_actor == "host" else "host",
     )
 
 
@@ -458,6 +474,17 @@ def _sanitize_scene_choice(
     if template != "explain_generic":
         spec = cartoon_director.TEMPLATES[template]
         overlay, action = spec.overlay, spec.pose
+    visual_actor = choice("visual_actor", _ACTORS, fallback.visual_actor)
+    if visual_actor == "none":
+        visual_actor = fallback.visual_actor
+    actor_role = choice("actor_role", _ACTOR_ROLES, fallback.actor_role)
+    # This release has one narration track. AI may stage the guest, but it cannot
+    # transfer ownership of narration mouth cues away from the host.
+    narration_actor = "host"
+    if visual_actor == "host":
+        actor_role = "narrator"
+    elif actor_role == "narrator":
+        actor_role = "reaction"
     overlay_text = _clean_overlay_text(raw.get("overlay_text"))
     if overlay != "none" and not overlay_text:
         overlay_text = fallback.overlay_text or _short_keyword(fallback.narration)
@@ -475,6 +502,10 @@ def _sanitize_scene_choice(
         accent_text=_clean_overlay_text(raw.get("accent_text")) or fallback.accent_text,
         timing_source=fallback.timing_source,
         **fields,
+        narration_actor=narration_actor,
+        visual_actor=visual_actor,
+        actor_role=actor_role,
+        supporting_character="guest" if visual_actor == "host" else "host",
     )
 
 
@@ -493,6 +524,10 @@ Subject: {subject}
 For each current beat, consider its previous and next beat. Select the observable
 EVENT that demonstrates the meaning, its state_before and state_after, and whether
 the same pending object continues. Do not merely match a noun to a topic card.
+A single narration voice is present: narration_actor is always host. Choose
+visual_actor (host, guest or none) and actor_role (narrator, focus, reaction,
+offscreen) separately. A guest may react or demonstrate while the host remains
+the offscreen narrator; never make guest mouth narration cues.
 A task saved for return is PARKED, never completed. A release needs a return point.
 Unsupported concepts use explain_generic; do not invent a causal relationship.
 
@@ -825,6 +860,9 @@ class DoodleRenderer:
 
     def story_mouth(self, t: float, speaking: bool) -> str:
         return _mouth_at(self.mouth_cues, t, speaking)
+
+    def mouth_for_character(self, scene: CartoonScene, actor: str, t: float) -> str:
+        return self.story_mouth(t, actor == scene.narration_actor)
 
     def sx(self, value: float) -> int:
         return int(round(value * self.width / 1080.0))
@@ -1243,7 +1281,7 @@ class DoodleRenderer:
         huge_font = _font(self.sc(102))
         small_font = _font(self.sc(34))
         ink = self.palette.card_ink
-        accent = self.palette.host if scene.speaker == "host" else self.palette.guest
+        accent = self.palette.host if scene.visual_actor == "host" else self.palette.guest
         overlay_text = scene.overlay_text or scene.accent_text or "IDEA"
 
         if scene.overlay in {"stat", "money"}:
@@ -1416,14 +1454,12 @@ class DoodleRenderer:
             cartoon_storytelling.draw_story(self, image, scene, self.story_state(t), progress, t)
             return image
 
-        speaking_host = scene.speaker == "host"
-        mouth = _mouth_at(self.mouth_cues, t, True)
-        closed = "X"
+        speaking_host = scene.narration_actor == "host"
         # Graphic layouts reserve the center for the explanatory card and keep a small
         # presenter at the desk edge so the format still feels like the same show.
         if scene.layout == "graphic":
             self._overlay(draw, scene, progress, t)
-            presenter_is_host = scene.speaker == "host"
+            presenter_is_host = scene.visual_actor != "guest"
             x = self.sx(165 if presenter_is_host else 915)
             self._character(
                 draw,
@@ -1433,7 +1469,7 @@ class DoodleRenderer:
                 shadow=self.palette.host_shadow if presenter_is_host else self.palette.guest_shadow,
                 emotion=scene.emotion,
                 action="react",
-                mouth=mouth,
+                mouth=self.mouth_for_character(scene, "host" if presenter_is_host else "guest", t),
                 facing=1 if presenter_is_host else -1,
                 t=t,
                 local_progress=progress,
@@ -1465,7 +1501,7 @@ class DoodleRenderer:
                 shadow=self.palette.host_shadow,
                 emotion=scene.emotion if speaking_host else "neutral",
                 action=scene.action if speaking_host else "react",
-                mouth=mouth if speaking_host else closed,
+                mouth=self.mouth_for_character(scene, "host", t),
                 facing=1,
                 t=t,
                 local_progress=progress,
@@ -1480,7 +1516,7 @@ class DoodleRenderer:
                 shadow=self.palette.guest_shadow,
                 emotion=scene.emotion if not speaking_host else "neutral",
                 action=scene.action if not speaking_host else "react",
-                mouth=mouth if not speaking_host else closed,
+                mouth=self.mouth_for_character(scene, "guest", t),
                 facing=-1,
                 t=t,
                 local_progress=progress,
@@ -1488,7 +1524,7 @@ class DoodleRenderer:
                 dimmed=speaking_host,
             )
         else:
-            host_layout = scene.layout == "host"
+            host_layout = scene.visual_actor != "guest"
             color = self.palette.host if host_layout else self.palette.guest
             shadow = self.palette.host_shadow if host_layout else self.palette.guest_shadow
             facing = 1 if host_layout else -1
@@ -1509,7 +1545,7 @@ class DoodleRenderer:
                 shadow=shadow,
                 emotion=scene.emotion,
                 action=scene.action,
-                mouth=mouth,
+                mouth=self.mouth_for_character(scene, "host" if host_layout else "guest", t),
                 facing=facing,
                 t=t,
                 local_progress=progress,

@@ -114,6 +114,26 @@ remains Phase 5 work.
 Tests: 63 cartoon tests passed; full suite passed with 1102 passed, 11 skipped,
 8558 subtests passed. Compile and Ruff passed.
 
+## Phase 4 — narrator, visual actor and reaction roles (verified)
+
+Scenes now carry explicit `narration_actor`, `visual_actor`, `actor_role` and
+`supporting_character`. The current single narration track fixes the narrator to
+the host. Guest-focused, graphic and two-shot staging can still vary, but only
+the host receives narration mouth cues. Legacy `speaker` remains serialized for
+compatibility and no longer owns mouth synchronization.
+
+Role tests cover all four layouts, malicious AI guest narrator choices and mouth
+ownership. Compile and Ruff passed; cartoon tests: 68 passed. The full suite
+passed with 1107 passed, 11 skipped, 8558 subtests passed. A Windows filesystem
+clock-skew tolerance was added to the existing material cache loader after a
+repeatable full-gate failure; genuinely future files remain invalidated.
+
+Real fallback render: `storage/tasks/cartoon-v2-phase4-fallback-cb12f78e`.
+Plan inspection confirms guest focus scenes retain `narration_actor=host` and
+`actor_role=reaction`; FFmpeg validates the final 1080x1920/30 fps video with
+21.340 s audio. Frame contact samples show host mouth activity while guest stays
+closed. Detailed acting polish remains Phase 7.
+
 4. Host narration independent of visual actor and guest reactions.
 5. Deterministic within-beat action and resolution.
 6. Staging and subtitle safe zones, cartoon-only adaptation.

@@ -185,7 +185,7 @@ def draw_story(renderer, image, scene, state, progress, t):
 
     # The recurring original cast grounds the demonstration in a shared setting.
     for host,x in ((True,275),(False,790)):
-        owns_voice=scene.speaker == ("host" if host else "guest")
+        owns_voice=scene.narration_actor == ("host" if host else "guest")
         emotion="happy" if template=="mental_release" and progress>.65 else (
             "concerned" if state.loop_active and not host else scene.emotion)
         renderer._character(
