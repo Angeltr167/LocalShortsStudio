@@ -134,8 +134,27 @@ Plan inspection confirms guest focus scenes retain `narration_actor=host` and
 21.340 s audio. Frame contact samples show host mouth activity while guest stays
 closed. Detailed acting polish remains Phase 7.
 
-4. Host narration independent of visual actor and guest reactions.
-5. Deterministic within-beat action and resolution.
+## Phase 5 — deterministic within-beat choreography (verified)
+
+`cartoon_choreography.py` divides every beat into bounded `enter`, `establish`,
+`action`, `emphasis` and `resolve` phases. The phase is derived only from the
+scene duration and absolute timestamp, so repeated frame requests are stable;
+short beats use a compact weighting that still preserves the action and
+resolution phases. Story templates consume those phases for deterministic
+causal motion: the task arrow enters, browser tabs populate and dim, the saved
+return marker resolves, and the release scene shifts attention to the plant.
+
+Choreography tests cover ordering, short-beat behavior, zero-duration safety,
+repeatability and frame differences. The focused cartoon suite passed with 76
+tests; compile and Ruff passed. The full suite passed with 1115 passed, 11
+skipped and 8558 subtests passed.
+
+Real fallback render: `storage/tasks/cartoon-v2-phase5-fallback-b2404e1a`.
+The material (1080x1920, 24 fps, 21.375 s) and final (1080x1920, 30 fps,
+21.366667 s video plus 21.340 s audio) decode cleanly. Motion contact samples
+show tab population/highlighting and the release transition; all required
+plan, storyboard, material and final artifacts are present.
+
 6. Staging and subtitle safe zones, cartoon-only adaptation.
 7. Audio-aware mouth smoothing and final acting; fresh Chatterbox/Ollama E2E.
 

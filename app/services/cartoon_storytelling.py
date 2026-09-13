@@ -9,6 +9,8 @@ import math
 
 from PIL import ImageDraw
 
+from app.services.cartoon_choreography import stage_at
+
 
 @dataclass(frozen=True)
 class StoryState:
@@ -93,6 +95,7 @@ def draw_story(renderer, image, scene, state, progress, t):
         circle(x+14*size,y+38*size,3*size,palette.red)
 
     template = scene.scene_template
+    stage = stage_at(scene, t)
     # Every representation occupies the same shared demonstration space.
     if template == "stop_work":
         box((225,320,855,740), fill="#D5DFEA")
@@ -103,7 +106,7 @@ def draw_story(renderer, image, scene, state, progress, t):
         # A pen visibly leaves the unfinished page; its unfinished line remains.
         lift=min(1,progress*2)
         line([(605+150*lift,585+90*lift),(675+150*lift,510+90*lift)],yellow,15)
-        if progress>0.35:
+        if stage.name in {"action", "emphasis", "resolve"}:
             arrow((780,660),(920,660))
     elif template in {"mental_persistence", "mental_release"}:
         # Thought cloud connected to the viewer proxy, rather than an isolated label.
@@ -112,7 +115,7 @@ def draw_story(renderer, image, scene, state, progress, t):
                 circle(x,y,r,"#DDEDF1")
             circle(710,640,28,"#DDEDF1")
             circle(740,750,16,"#DDEDF1")
-            if state.loop_active:
+            if state.loop_active and stage.name in {"establish", "action", "emphasis"}:
                 angle=t*2.1
                 draw.arc((sx(330),sy(190),sx(755),sy(590)), 20,335,
                          fill=palette.red,width=sc(10))
@@ -140,7 +143,7 @@ def draw_story(renderer, image, scene, state, progress, t):
         for y in (440,490,540,590):
             line([(220,y),(815,y)],"#C8CAD4",15)
         # Other tabs dim while the pending item stays open.
-        if progress>0.4:
+        if stage.name in {"emphasis", "resolve"}:
             for x in (235,410,760):
                 line([(x,310),(x+45,310)],paper,15)
     elif template == "unfinished_email":
@@ -173,7 +176,7 @@ def draw_story(renderer, image, scene, state, progress, t):
         line([(770,365),(945,365)],palette.cyan,12)
         circle(923,228,23,paper,ink)
         line([(923,211),(923,228),(936,236)],ink,4)
-        if template=="task_parked" and progress<0.8:
+        if template=="task_parked" and stage.name != "resolve":
             arrow((665,430),(760,340),palette.cyan)
 
     pending_marker(state.x,state.y)
