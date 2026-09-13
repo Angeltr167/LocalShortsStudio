@@ -38,7 +38,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from app.config import config
 from app.models.schema import VideoAspect, VideoParams
-from app.services import cartoon_director, llm, task_artifacts
+from app.services import cartoon_director, cartoon_storytelling, llm, task_artifacts
 from app.utils import utils
 
 
@@ -820,6 +820,12 @@ class DoodleRenderer:
         self.scale = min(width / 1080.0, height / 1920.0)
         self.palette = PALETTE
 
+    def story_state(self, t: float) -> cartoon_storytelling.StoryState:
+        return cartoon_storytelling.state_at(self.scenes, t)
+
+    def story_mouth(self, t: float, speaking: bool) -> str:
+        return _mouth_at(self.mouth_cues, t, speaking)
+
     def sx(self, value: float) -> int:
         return int(round(value * self.width / 1080.0))
 
@@ -1406,6 +1412,10 @@ class DoodleRenderer:
         self._background(draw, t)
         self._table(draw)
 
+        if scene.continuity_object and scene.scene_template in cartoon_storytelling.DESTINATIONS:
+            cartoon_storytelling.draw_story(self, image, scene, self.story_state(t), progress, t)
+            return image
+
         speaking_host = scene.speaker == "host"
         mouth = _mouth_at(self.mouth_cues, t, True)
         closed = "X"
@@ -1519,27 +1529,29 @@ def _write_storyboard(
     destination: Path,
 ) -> None:
     thumbs: list[Image.Image] = []
-    for scene in scenes[:12]:
-        t = min(scene.end - 0.05, scene.start + min(0.8, scene.duration * 0.35))
-        frame = renderer.render(max(scene.start, t))
-        thumb = frame.copy()
-        thumb.thumbnail((270, 480), Image.Resampling.LANCZOS)
-        canvas = Image.new("RGB", (290, 530), "#0B0C12")
-        canvas.paste(thumb, ((290 - thumb.width) // 2, 10))
-        label_draw = ImageDraw.Draw(canvas)
-        label_draw.text((12, 490), f"Scene {scene.scene} · {scene.overlay}", font=_font(20), fill="white")
-        thumbs.append(canvas)
-    if not thumbs:
-        return
-    columns = min(4, len(thumbs))
-    rows = math.ceil(len(thumbs) / columns)
-    sheet = Image.new("RGB", (columns * 300, rows * 540), "#11131D")
-    for index, thumb in enumerate(thumbs):
-        x = (index % columns) * 300 + 5
-        y = (index // columns) * 540 + 5
-        sheet.paste(thumb, (x, y))
+    for scene in scenes:
+        for phase, fraction in (("begin", 0.03), ("resolve", 0.97)):
+            t = scene.start + scene.duration * fraction
+            frame = renderer.render(t)
+            thumb = frame.copy()
+            thumb.thumbnail((270, 480), Image.Resampling.LANCZOS)
+            canvas = Image.new("RGB", (290, 530), "#0B0C12")
+            canvas.paste(thumb, ((290 - thumb.width) // 2, 10))
+            label = f"{scene.scene} {phase} {t:.2f}s\n{scene.scene_template}"
+            ImageDraw.Draw(canvas).text((12, 490), label, font=_font(14), fill="white")
+            thumbs.append(canvas)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    sheet.save(destination, "JPEG", quality=88, optimize=True)
+    for offset in range(0, len(thumbs), 12):
+        page = thumbs[offset:offset + 12]
+        columns = min(4, len(page))
+        rows = math.ceil(len(page) / columns)
+        sheet = Image.new("RGB", (columns * 300, rows * 540), "#11131D")
+        for index, thumb in enumerate(page):
+            sheet.paste(thumb, ((index % columns) * 300 + 5, (index // columns) * 540 + 5))
+        target = destination if offset == 0 else destination.with_stem(
+            f"{destination.stem}_{offset // 12 + 1:02d}"
+        )
+        sheet.save(target, "JPEG", quality=88, optimize=True)
 
 
 def _resolution(aspect: VideoAspect | str) -> tuple[int, int]:

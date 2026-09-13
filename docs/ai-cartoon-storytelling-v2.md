@@ -94,7 +94,26 @@ this checkpoint certifies direction, not the muted storytelling quality gate.
 
 ## Remaining sequence
 
-3. Persistent objects and visible cause/effect; parked is not completed.
+## Phase 3 — persistent visual storytelling (verified)
+
+`cartoon_storytelling.py` adds a small immutable state resolver and a renderer
+adapter. The same `pending_item_1` marker now travels through task, thought,
+browser, email, note, return slot and release states. `parked` is distinct from
+`completed`; release closes the mental loop while leaving the saved return item
+visible. Frame output is independent of request order.
+
+The storyboard now includes begin/resolve samples for every beat, with extra
+pages when needed. Production renders were run with both modes:
+`storage/tasks/cartoon-v2-phase3-fallback-829addee` and
+`storage/tasks/cartoon-v2-phase3-reference-305e487c`. All required artifacts
+exist, both material/final pairs decode with FFmpeg, and final audio remains
+21.340 s at 1080x1920/30 fps. Visual inspection shows the task marker moving
+through representations and the mental loop closing; detailed timing animation
+remains Phase 5 work.
+
+Tests: 63 cartoon tests passed; full suite passed with 1102 passed, 11 skipped,
+8558 subtests passed. Compile and Ruff passed.
+
 4. Host narration independent of visual actor and guest reactions.
 5. Deterministic within-beat action and resolution.
 6. Staging and subtitle safe zones, cartoon-only adaptation.
