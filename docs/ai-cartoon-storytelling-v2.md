@@ -62,9 +62,38 @@ voice-preview input, supplying preserved narration/cues in a new task directory:
 uv run --no-sync python -X utf8 tools/verify_cartoon_storytelling.py --phase 1 --mode reference --reference-dir storage/tasks/721f5d9e-e19d-489a-b1ac-a03322e07058
 ```
 
+## Phase 2 — bounded storytelling director (verified)
+
+Plan schema version 2 adds template, focus object, visual action, before/after
+states and a bounded continuity identifier. Templates consume overlay/pose now;
+their persistent representations are the immediate Phase 3 consumer. Existing
+scene constructors retain defaults and generic overlays remain supported.
+
+The pure `cartoon_director.py` module owns the vocabulary and coupled validation,
+separate from LLM transport and drawing. Fallback uses bounded event relations,
+negation and previous-state context, not whole script matching. A second scenario
+records an idea and saves it for later. The prompt supplies neighboring beats;
+AI cannot change timing or inject drawing instructions. Duplicate scene numbers
+reject the plan; missing choices receive deterministic defaults.
+
+TDD reproduction: 9 failures before implementation. Phase tests plus engine and
+timeline: 40 passed. All cartoon tests: 57 passed. Compile exit 0; Ruff passed.
+Full suite: 1096 passed, 11 skipped, 8558 subtests passed in 250.15 seconds.
+
+Real production pipeline renders:
+- Qwen: `storage/tasks/cartoon-v2-phase2-reference-dd1be29c`.
+- Fallback: `storage/tasks/cartoon-v2-phase2-fallback-e000f6d5`.
+
+Both plans have identical eight-beat timings and semantic transitions from
+working through unfinished, mentally active, open tab, draft, recorded, parked,
+released. Both use the same bounded object identifier. All four required artifacts
+were inspected; both material/final MP4 pairs fully decode. Final videos retain
+21.340 s audio and 21.366667 s video at 1080x1920/30 fps (existing compositor).
+The still-legacy drawings retain known clipping, role and static-card limitations;
+this checkpoint certifies direction, not the muted storytelling quality gate.
+
 ## Remaining sequence
 
-2. Bounded storytelling direction with validated actions and states.
 3. Persistent objects and visible cause/effect; parked is not completed.
 4. Host narration independent of visual actor and guest reactions.
 5. Deterministic within-beat action and resolution.

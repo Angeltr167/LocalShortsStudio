@@ -38,7 +38,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from app.config import config
 from app.models.schema import VideoAspect, VideoParams
-from app.services import llm, task_artifacts
+from app.services import cartoon_director, llm, task_artifacts
 from app.utils import utils
 
 
@@ -47,7 +47,7 @@ class CartoonRenderError(RuntimeError):
 
 
 CARTOON_PLAN_SCHEMA = "localshortsstudio.ai-cartoon-plan"
-CARTOON_PLAN_VERSION = 1
+CARTOON_PLAN_VERSION = 2
 DEFAULT_FPS = 24
 MIN_SCENE_SECONDS = 1.6
 MAX_SCENE_SECONDS = 6.5
@@ -106,6 +106,12 @@ class CartoonScene:
     overlay_text: str = ""
     accent_text: str = ""
     timing_source: str = "fallback_proportional"
+    scene_template: str = "explain_generic"
+    focus_object: str = "none"
+    visual_action: str = "explain"
+    state_before: str = "neutral"
+    state_after: str = "neutral"
+    continuity_object: str = ""
 
     @property
     def duration(self) -> float:
@@ -126,6 +132,12 @@ class CartoonScene:
             "overlay_text": self.overlay_text,
             "accent_text": self.accent_text,
             "timing_source": self.timing_source,
+            "scene_template": self.scene_template,
+            "focus_object": self.focus_object,
+            "visual_action": self.visual_action,
+            "state_before": self.state_before,
+            "state_after": self.state_after,
+            "continuity_object": self.continuity_object,
         }
 
 
@@ -365,7 +377,7 @@ def _fallback_overlay(text: str) -> tuple[str, str]:
     return "none", ""
 
 
-def _fallback_scene(cue: NarrationCue, index: int) -> CartoonScene:
+def _fallback_scene(cue: NarrationCue, index: int, previous_state: str = "neutral") -> CartoonScene:
     overlay, overlay_text = _fallback_overlay(cue.text)
     if overlay != "none" and index % 3 == 2:
         layout = "graphic"
@@ -391,6 +403,11 @@ def _fallback_scene(cue: NarrationCue, index: int) -> CartoonScene:
         action = "think"
     else:
         action = "explain" if index % 2 == 0 else "talk"
+    template = cartoon_director.fallback_template(cue.text, previous_state)
+    fields = cartoon_director.story_fields(template, previous_state)
+    if template != "explain_generic":
+        spec = cartoon_director.TEMPLATES[template]
+        overlay, action = spec.overlay, spec.pose
     return CartoonScene(
         scene=index + 1,
         start=cue.start,
@@ -404,6 +421,7 @@ def _fallback_scene(cue: NarrationCue, index: int) -> CartoonScene:
         overlay_text=overlay_text,
         accent_text=_short_keyword(cue.text, ""),
         timing_source=cue.timing_source,
+        **fields,
     )
 
 
@@ -426,12 +444,20 @@ def _json_payload_from_response(text: str) -> Any:
         raise
 
 
-def _sanitize_scene_choice(raw: dict[str, Any], fallback: CartoonScene) -> CartoonScene:
+def _sanitize_scene_choice(
+    raw: dict[str, Any], fallback: CartoonScene, previous_state: str = "neutral"
+) -> CartoonScene:
     def choice(key: str, allowed: frozenset[str], default: str) -> str:
         value = str(raw.get(key) or "").strip().lower()
         return value if value in allowed else default
 
     overlay = choice("overlay", _OVERLAYS, fallback.overlay)
+    fields = cartoon_director.validated_fields(raw, fallback, previous_state)
+    template = fields["scene_template"]
+    action = choice("action", _ACTIONS, fallback.action)
+    if template != "explain_generic":
+        spec = cartoon_director.TEMPLATES[template]
+        overlay, action = spec.overlay, spec.pose
     overlay_text = _clean_overlay_text(raw.get("overlay_text"))
     if overlay != "none" and not overlay_text:
         overlay_text = fallback.overlay_text or _short_keyword(fallback.narration)
@@ -443,54 +469,48 @@ def _sanitize_scene_choice(raw: dict[str, Any], fallback: CartoonScene) -> Carto
         layout=choice("layout", _LAYOUTS, fallback.layout),
         speaker=choice("speaker", _SPEAKERS, fallback.speaker),
         emotion=choice("emotion", _EMOTIONS, fallback.emotion),
-        action=choice("action", _ACTIONS, fallback.action),
+        action=action,
         overlay=overlay,
         overlay_text=overlay_text,
         accent_text=_clean_overlay_text(raw.get("accent_text")) or fallback.accent_text,
         timing_source=fallback.timing_source,
+        **fields,
     )
 
 
 def _director_prompt(subject: str, fallbacks: list[CartoonScene]) -> str:
-    compact_scenes = [
-        {
-            "scene": scene.scene,
-            "start": round(scene.start, 2),
-            "end": round(scene.end, 2),
-            "narration": scene.narration,
-            "fallback_overlay": scene.overlay,
-        }
-        for scene in fallbacks
-    ]
-    return f"""
-You are a visual director for an original 2D doodle podcast explainer.
-Choose a clear visual treatment for every narration scene. The actual renderer is
-procedural, so you MUST use only the allowed enum values below.
+    beats = [dict(scene=scene.scene, narration=scene.narration,
+                  previous=fallbacks[i - 1].narration if i else "",
+                  next=fallbacks[i + 1].narration if i + 1 < len(fallbacks) else "",
+                  fallback_template=scene.scene_template)
+             for i, scene in enumerate(fallbacks)]
+    vocabulary = {name: dict(focus_object=spec.focus_object,
+                             visual_action=spec.visual_action,
+                             state_before=list(spec.before), state_after=spec.after)
+                  for name, spec in cartoon_director.TEMPLATES.items()}
+    return f"""You direct bounded visual storytelling for an original procedural cartoon.
+Subject: {subject}
+For each current beat, consider its previous and next beat. Select the observable
+EVENT that demonstrates the meaning, its state_before and state_after, and whether
+the same pending object continues. Do not merely match a noun to a topic card.
+A task saved for return is PARKED, never completed. A release needs a return point.
+Unsupported concepts use explain_generic; do not invent a causal relationship.
 
-Video subject: {subject}
-
-Allowed layout: host, guest, two_shot, graphic
-Allowed speaker: host, guest
-Allowed emotion: neutral, thinking, surprised, happy, concerned
-Allowed action: talk, explain, point, think, react, write
-Allowed overlay: none, stat, browser_tabs, email, checklist, brain, phone, chart,
-money, clock, comparison, thought
-
-Rules:
-- preserve scene numbers and return exactly one entry per supplied scene;
-- choose visuals that communicate meaning, not just object overlap;
-- use graphic overlays when a concept, number, UI state or comparison benefits from it;
-- overlay_text must be visible on screen, concise (ideally 1-5 words), and never exceed 42 characters;
-- alternate host/guest/two-shot enough to avoid visual monotony;
-- do not request stock footage, images, camera realism, brands, copyrighted characters, or new enum values;
-- return ONLY valid JSON, no markdown and no explanation.
-
-Output shape:
-{{"scenes":[{{"scene":1,"layout":"host","speaker":"host","emotion":"neutral","action":"explain","overlay":"none","overlay_text":"","accent_text":""}}]}}
-
-Scenes:
-{json.dumps(compact_scenes, ensure_ascii=False)}
-""".strip()
+Return exactly one entry per supplied scene number. Never change narration or
+supply timestamps, coordinates, Python, assets or free-form drawing instructions.
+Only these coupled template choices are executable:
+{json.dumps(vocabulary, ensure_ascii=False)}
+continuity_object must be pending_item_1 for these story templates, empty for explain_generic.
+Optional staging: layout=host|guest|two_shot|graphic;
+emotion=neutral|thinking|surprised|happy|concerned.
+Optional overlay_text: at most 42 characters, concise. Text is supporting evidence,
+not the visual event. Existing generic overlays: {', '.join(sorted(_OVERLAYS))}.
+Return JSON only, no markdown or explanation:
+{{"scenes":[{{"scene":1,"scene_template":"stop_work","focus_object":"task",
+"visual_action":"set_aside","state_before":"working","state_after":"unfinished",
+"continuity_object":"pending_item_1","layout":"host","emotion":"thinking"}}]}}
+Beats:
+{json.dumps(beats, ensure_ascii=False)}"""
 
 
 def build_cartoon_plan(
@@ -503,7 +523,12 @@ def build_cartoon_plan(
     app_config=None,
 ) -> tuple[list[CartoonScene], str]:
     timeline = build_narration_timeline(script, audio_duration, subtitle_path)
-    fallbacks = [_fallback_scene(cue, index) for index, cue in enumerate(timeline)]
+    fallbacks = []
+    previous_state = "neutral"
+    for index, cue in enumerate(timeline):
+        scene = _fallback_scene(cue, index, previous_state)
+        fallbacks.append(scene)
+        previous_state = scene.state_after
     if not ai_director:
         return fallbacks, "deterministic"
 
@@ -519,15 +544,20 @@ def build_cartoon_plan(
         raw_scenes = payload.get("scenes") if isinstance(payload, dict) else payload
         if not isinstance(raw_scenes, list):
             raise ValueError("AI cartoon plan must contain a scenes list")
-        by_number = {
-            int(item.get("scene")): item
-            for item in raw_scenes
-            if isinstance(item, dict) and str(item.get("scene", "")).isdigit()
-        }
-        directed = [
-            _sanitize_scene_choice(by_number.get(fallback.scene, {}), fallback)
-            for fallback in fallbacks
-        ]
+        by_number = {}
+        for item in raw_scenes:
+            if not isinstance(item, dict) or type(item.get("scene")) is not int:
+                raise ValueError("each directed scene requires an integer scene number")
+            number = item["scene"]
+            if number in by_number or not 1 <= number <= len(fallbacks):
+                raise ValueError("duplicate or out-of-range directed scene number")
+            by_number[number] = item
+        directed = []
+        previous_state = "neutral"
+        for fallback in fallbacks:
+            scene = _sanitize_scene_choice(by_number.get(fallback.scene, {}), fallback, previous_state)
+            directed.append(scene)
+            previous_state = scene.state_after
         return directed, "ai"
     except Exception as exc:
         logger.warning(f"invalid AI cartoon plan; using deterministic plan: {exc}")
