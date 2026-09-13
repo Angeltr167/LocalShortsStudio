@@ -1,4 +1,4 @@
-name: Verify AI Cartoon Engine
+name: Verify AI Cartoon Visual Polish
 
 on:
   push:
@@ -10,14 +10,11 @@ permissions:
   contents: write
 
 concurrency:
-  group: ai-cartoon-engine-${{ github.ref }}
+  group: ai-cartoon-visual-polish-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   apply-test-commit:
-    # The verified job commits the integrated implementation back to this branch.
-    # Skip the bot-triggered follow-up run so the one-shot patch scripts are not
-    # intentionally applied a second time to already-integrated sources.
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -38,11 +35,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Apply AI cartoon integration patch
-        run: |
-          python .github/scripts/apply_ai_cartoon_engine_patch.py
-          python .github/scripts/apply_ai_cartoon_ollama_director_patch.py
-          python .github/scripts/apply_ai_cartoon_ui_polish_patch.py
+      - name: Apply AI cartoon visual polish patch
+        run: python .github/scripts/apply_ai_cartoon_visual_polish_patch.py
 
       - name: Inspect patch integrity
         run: |
@@ -51,40 +45,36 @@ jobs:
           from pathlib import Path
 
           checks = {
-              "app/models/schema.py": (
-                  "cartoon_ai_director",
-                  "cartoon_lip_sync",
-                  "cartoon_fps",
-              ),
-              "app/services/llm.py": (
-                  "def generate_cartoon_direction",
-                  '"think": False',
-                  '"format": "json"',
-              ),
-              "app/services/task.py": (
-                  "cartoon_engine.render_cartoon_material",
-                  'params.video_source == "ai_cartoon"',
-                  "shutil.copy2(downloaded_videos[0], combined_video_path)",
+              "app/services/cartoon_engine.py": (
+                  "def _heuristic_audio_mouth_cues",
+                  "def _compact_overlay",
+                  "identity_host = color == self.palette.host",
+                  'elif action == "react":',
               ),
               "webui/Main.py": (
-                  '"ai_cartoon"',
-                  "AI Cartoon",
-                  "Lip sync",
-                  "Scene changes are authored inside the cartoon timeline.",
-                  "narration timing controls scene duration",
+                  '"ai_cartoon",',
+                  'key="video_concat_mode_cartoon_locked"',
+                  "AI Cartoon uses one authored narration timeline in sequential order.",
               ),
-              "app/services/gpt_visual_review.py": ("MAX_RETRY_ROUNDS = 3",),
+              "test/services/test_cartoon_engine.py": (
+                  "test_audio_aware_heuristic_mouth_closes_between_cues",
+                  "test_non_graphic_semantic_overlay_renders_real_visual_card",
+              ),
+              "test/services/test_cartoon_webui_contract.py": (
+                  "test_ai_cartoon_is_accepted_by_generation_validation",
+                  "test_ai_cartoon_concat_widget_is_visibly_locked_to_sequential",
+              ),
           }
           for path, needles in checks.items():
               text = Path(path).read_text(encoding="utf-8")
               for needle in needles:
                   if needle not in text:
                       raise SystemExit(
-                          f"missing expected integration marker {needle!r} in {path}"
+                          f"missing expected visual-polish marker {needle!r} in {path}"
                       )
-          print("complete cartoon integration markers verified")
+          print("AI cartoon visual-polish markers verified")
           PY
-          git diff -- app/models/schema.py app/services/llm.py app/services/task.py webui/Main.py
+          git diff -- app/services/cartoon_engine.py webui/Main.py test/services/test_cartoon_engine.py test/services/test_cartoon_webui_contract.py
 
       - name: Install locked dependencies
         run: uv sync --frozen --python 3.11
@@ -93,32 +83,23 @@ jobs:
         run: >-
           uv run --no-sync python -m compileall -q
           app/services/cartoon_engine.py
-          app/models/schema.py
-          app/services/llm.py
-          app/services/task.py
           webui/Main.py
           test/services/test_cartoon_engine.py
-          test/services/test_cartoon_final_pipeline.py
-          test/services/test_cartoon_render_smoke.py
-          test/services/test_cartoon_ollama_director.py
+          test/services/test_cartoon_webui_contract.py
 
       - name: Ruff changed sources
         run: >-
           uv run --no-sync ruff check
           app/services/cartoon_engine.py
-          app/models/schema.py
-          app/services/llm.py
-          app/services/task.py
           webui/Main.py
           test/services/test_cartoon_engine.py
-          test/services/test_cartoon_final_pipeline.py
-          test/services/test_cartoon_render_smoke.py
-          test/services/test_cartoon_ollama_director.py
+          test/services/test_cartoon_webui_contract.py
 
       - name: Run focused cartoon tests
         run: >-
           uv run --no-sync python -X utf8 -m pytest -q
           test/services/test_cartoon_engine.py
+          test/services/test_cartoon_webui_contract.py
           test/services/test_cartoon_final_pipeline.py
           test/services/test_cartoon_render_smoke.py
           test/services/test_cartoon_ollama_director.py
@@ -128,23 +109,18 @@ jobs:
       - name: Run full test suite
         run: uv run --no-sync python -X utf8 -m pytest -q test
 
-      - name: Commit verified AI cartoon engine
+      - name: Commit verified AI cartoon visual polish
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
             app/services/cartoon_engine.py \
-            app/models/schema.py \
-            app/services/llm.py \
-            app/services/task.py \
             webui/Main.py \
             test/services/test_cartoon_engine.py \
-            test/services/test_cartoon_final_pipeline.py \
-            test/services/test_cartoon_render_smoke.py \
-            test/services/test_cartoon_ollama_director.py
+            test/services/test_cartoon_webui_contract.py
           if git diff --cached --quiet; then
             echo "No implementation changes to commit"
             exit 0
           fi
-          git commit -m "feat: add AI-directed procedural cartoon mode"
+          git commit -m "feat: polish AI cartoon visual storytelling"
           git push origin HEAD:feature/ai-cartoon-engine
