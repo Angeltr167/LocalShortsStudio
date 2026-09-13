@@ -44,4 +44,3 @@ def test_auto_lipsync_keeps_deterministic_heuristic_fallback_when_audio_analysis
     # speaking actor, while a reaction actor stays closed.
     assert cartoon_engine._mouth_at([], 0.25, True) == cartoon_engine._mouth_at([], 0.25, True)
     assert cartoon_engine._mouth_at([], 0.25, False) == "X"
-
