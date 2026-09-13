@@ -159,12 +159,17 @@ class TestMaterialSearchCache(unittest.TestCase):
         cache_path = self._cache_path()
         cache_path.write_text("{invalid-json", encoding="utf-8")
 
+        # Exercise JSON corruption, not filesystem/wall-clock skew on Windows.
+        # Future/expired timestamps have their own dedicated tests above.
+        now = cache_path.stat().st_mtime + 1
+
         with patch("app.services.material_cache.logger.warning") as warning:
             loaded = material_cache.load_material_search_cache(
                 provider="pixabay",
                 search_term="nature",
                 minimum_duration=5,
                 video_aspect=VideoAspect.portrait,
+                now=now,
             )
 
         self.assertIsNone(loaded)

@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -67,5 +68,6 @@ def test_headless_open_folder_shows_host_mapped_path(headless_task_app):
 
     assert not app.exception
     assert any(
-        "./storage/tasks/headless-test" in toast.value for toast in app.get("toast")
+        f"./storage/{os.path.join('tasks', 'headless-test')}" in toast.value
+        for toast in app.get("toast")
     )

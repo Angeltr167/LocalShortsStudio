@@ -26,10 +26,12 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import unicodedata
 from array import array
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Literal
 
 from loguru import logger
 from PIL import Image, ImageDraw, ImageFont
@@ -80,6 +82,7 @@ class NarrationCue:
     start: float
     end: float
     text: str
+    timing_source: str = "fallback_proportional"
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,7 @@ class CartoonScene:
     overlay: str
     overlay_text: str = ""
     accent_text: str = ""
+    timing_source: str = "fallback_proportional"
 
     @property
     def duration(self) -> float:
@@ -121,6 +125,7 @@ class CartoonScene:
             "overlay": self.overlay,
             "overlay_text": self.overlay_text,
             "accent_text": self.accent_text,
+            "timing_source": self.timing_source,
         }
 
 
@@ -185,76 +190,32 @@ def parse_srt_cues(path: str | Path) -> list[NarrationCue]:
 
 
 def _script_sentences(script: str) -> list[str]:
-    text = re.sub(r"\s+", " ", str(script or "")).strip()
-    if not text:
-        return []
-    chunks = re.split(r"(?<=[.!?。！？])\s+|\n+", text)
-    return [chunk.strip() for chunk in chunks if chunk.strip()]
+    # Preserve paragraph boundaries before normalizing whitespace. These are
+    # deliberately small EN/ES rules, not a general semantic language parser.
+    beats: list[str] = []
+    for paragraph in re.split(r"\n+", str(script or "")):
+        text = re.sub(r"\s+", " ", paragraph).strip()
+        protected = re.sub(
+            r"\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Sra|Dra)\.",
+            lambda match: match[0].replace(".", "\ue000"), text, flags=re.I,
+        )
+        sentences = re.split(r"(?<=[.!?])\s+|(?<=[。！？])", protected)
+        for sentence in sentences:
+            sentence = sentence.replace("\ue000", ".")
+            # Keep introductory conditions with their instruction. Split only
+            # explicit contrast, analogy and consequence at a clause boundary.
+            clauses = re.split(
+                r",?\s+(?=(?:but|pero)\s+(?:the|your|it|you|la|el|tu)\b|"
+                r"(?:almost like|much like|just like|casi como)\b|"
+                r"so\s+(?:your|you|the|it)\b|(?:así que|por lo que)\b)",
+                sentence, flags=re.I,
+            )
+            beats.extend(part.strip() for part in clauses if part.strip())
+    return beats
 
 
-def _fallback_timed_cues(script: str, duration: float) -> list[NarrationCue]:
-    sentences = _script_sentences(script)
-    if not sentences:
-        return [NarrationCue(0.0, max(1.0, duration), "")]
-    weights = [max(3, len(re.findall(r"\w+", sentence))) for sentence in sentences]
-    weight_total = max(1, sum(weights))
-    cursor = 0.0
-    cues: list[NarrationCue] = []
-    for index, (sentence, weight) in enumerate(zip(sentences, weights)):
-        if index == len(sentences) - 1:
-            end = duration
-        else:
-            end = min(duration, cursor + duration * weight / weight_total)
-        end = max(cursor + 0.25, end)
-        cues.append(NarrationCue(cursor, min(duration, end), sentence))
-        cursor = min(duration, end)
-    return cues
-
-
-def _merge_tiny_cues(cues: Iterable[NarrationCue], duration: float) -> list[NarrationCue]:
-    source = [cue for cue in cues if cue.end > cue.start]
-    if not source:
-        return []
-    merged: list[NarrationCue] = []
-    buffer_start = source[0].start
-    buffer_end = source[0].end
-    buffer_text = [source[0].text]
-    for cue in source[1:]:
-        buffered_duration = buffer_end - buffer_start
-        if buffered_duration < MIN_SCENE_SECONDS or cue.end - buffer_start <= MAX_SCENE_SECONDS:
-            buffer_end = cue.end
-            buffer_text.append(cue.text)
-            # A natural sentence boundary and enough duration are good places to cut.
-            if (
-                buffer_end - buffer_start >= 2.5
-                and re.search(r"[.!?。！？]$", cue.text.strip())
-            ):
-                merged.append(
-                    NarrationCue(buffer_start, buffer_end, " ".join(buffer_text).strip())
-                )
-                buffer_start = buffer_end
-                buffer_text = []
-            continue
-        merged.append(NarrationCue(buffer_start, buffer_end, " ".join(buffer_text).strip()))
-        buffer_start = cue.start
-        buffer_end = cue.end
-        buffer_text = [cue.text]
-    if buffer_text:
-        merged.append(NarrationCue(buffer_start, buffer_end, " ".join(buffer_text).strip()))
-
-    # Guarantee visual coverage from t=0 to the narration tail. Small gaps inherit the
-    # surrounding scene instead of producing a black frame.
-    normalized: list[NarrationCue] = []
-    cursor = 0.0
-    for cue in merged:
-        start = cursor
-        end = max(start + 0.15, cue.end)
-        normalized.append(NarrationCue(start, min(duration, end), cue.text))
-        cursor = min(duration, end)
-    if normalized and normalized[-1].end < duration:
-        last = normalized[-1]
-        normalized[-1] = NarrationCue(last.start, duration, last.text)
-    return normalized
+def _alignment_tokens(text: str) -> list[str]:
+    return re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", text).casefold())
 
 
 def build_narration_timeline(
@@ -262,11 +223,74 @@ def build_narration_timeline(
     audio_duration: float,
     subtitle_path: str = "",
 ) -> list[NarrationCue]:
-    duration = max(float(audio_duration or 0), 0.5)
-    cues = parse_srt_cues(subtitle_path) if subtitle_path else []
-    if not cues:
-        cues = _fallback_timed_cues(script, duration)
-    return _merge_tiny_cues(cues, duration) or [NarrationCue(0.0, duration, script)]
+    """Script-first beats, with monotone SRT anchors and explicit estimates.
+
+    SRT boundaries describe subtitle timing, not necessarily measured phonemes.
+    Internal word positions are proportional estimates; no AI controls timing.
+    """
+    duration = float(audio_duration)
+    if not math.isfinite(duration) or duration <= 0:
+        raise CartoonRenderError("narration duration must be finite and positive")
+    source = parse_srt_cues(subtitle_path) if subtitle_path else []
+    source = sorted(
+        (cue for cue in source if cue.start < duration and cue.end > 0),
+        key=lambda cue: (cue.start, cue.end),
+    )
+    beats = _script_sentences(script)
+    if not beats:
+        beats = [cue.text for cue in source] or [""]
+    tokens_by_beat = [_alignment_tokens(beat) for beat in beats]
+    weights = [max(1, len(tokens)) for tokens in tokens_by_beat]
+    total = sum(weights)
+    script_tokens = [token for tokens in tokens_by_beat for token in tokens]
+    subtitle_tokens: list[str] = []
+    token_times: list[tuple[float, str]] = []
+    previous_time = 0.0
+    for cue in source:
+        tokens = _alignment_tokens(cue.text)
+        start, end = max(0.0, cue.start), min(duration, cue.end)
+        for index, token in enumerate(tokens):
+            timestamp = start + (end - start) * index / len(tokens)
+            # Overlapping cues must never make the visual timeline run backward.
+            timestamp = max(previous_time, timestamp)
+            previous_time = timestamp
+            subtitle_tokens.append(token)
+            token_times.append((timestamp, "direct_srt" if index == 0 else "interpolated_srt"))
+    anchors: dict[int, tuple[float, str]] = {}
+    matcher = SequenceMatcher(None, script_tokens, subtitle_tokens, autojunk=False)
+    for block in matcher.get_matching_blocks():
+        for offset in range(block.size):
+            anchors[block.a + offset] = token_times[block.b + offset]
+
+    boundaries = [0.0]
+    origins = ["direct_srt" if anchors.get(0, (None,))[0] == 0 else "fallback_proportional"]
+    token_cursor = 0
+    weight_cursor = 0
+    for index in range(1, len(beats)):
+        token_cursor += len(tokens_by_beat[index - 1])
+        weight_cursor += weights[index - 1]
+        if token_cursor in anchors:
+            timestamp, origin = anchors[token_cursor]
+        elif anchors:
+            left = max((key for key in anchors if key < token_cursor), default=-1)
+            right = min((key for key in anchors if key > token_cursor), default=len(script_tokens))
+            left_time = anchors[left][0] if left >= 0 else 0.0
+            right_time = anchors[right][0] if right in anchors else duration
+            fraction = (token_cursor - left) / max(1, right - left)
+            timestamp = left_time + (right_time - left_time) * fraction
+            origin = "interpolated_srt"
+        else:
+            timestamp = duration * weight_cursor / total
+            origin = "fallback_proportional"
+        # Reserve a positive interval for every beat, including malformed SRT.
+        epsilon = min(0.001, duration / (len(beats) * 10))
+        timestamp = min(duration - epsilon * (len(beats) - index),
+                        max(boundaries[-1] + epsilon, timestamp))
+        boundaries.append(timestamp)
+        origins.append(origin)
+    boundaries.append(duration)
+    return [NarrationCue(boundaries[i], boundaries[i + 1], beat, origins[i])
+            for i, beat in enumerate(beats)]
 
 
 def _clean_overlay_text(value: Any) -> str:
@@ -379,6 +403,7 @@ def _fallback_scene(cue: NarrationCue, index: int) -> CartoonScene:
         overlay=overlay,
         overlay_text=overlay_text,
         accent_text=_short_keyword(cue.text, ""),
+        timing_source=cue.timing_source,
     )
 
 
@@ -422,6 +447,7 @@ def _sanitize_scene_choice(raw: dict[str, Any], fallback: CartoonScene) -> Carto
         overlay=overlay,
         overlay_text=overlay_text,
         accent_text=_clean_overlay_text(raw.get("accent_text")) or fallback.accent_text,
+        timing_source=fallback.timing_source,
     )
 
 

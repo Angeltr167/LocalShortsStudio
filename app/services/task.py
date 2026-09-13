@@ -495,7 +495,10 @@ def _resolve_reusable_voice_preview(
     logger.info(
         f"using full voice preview audio, task_id: {task_id}, duration: {duration:.2f}s"
     )
-    return preview_file, math.ceil(duration), sub_maker
+    resolved_duration = (
+        duration if getattr(params, "video_source", "") == "ai_cartoon" else math.ceil(duration)
+    )
+    return preview_file, resolved_duration, sub_maker
 
 
 def generate_audio(
@@ -567,8 +570,13 @@ def generate_audio(
         # audio_duration to the API/WebUI, and under-sources
         # download_videos() material, scaled by video_count.
         file_duration = voice.get_audio_duration(audio_file)
-        audio_duration = math.ceil(
+        measured_duration = (
             file_duration if file_duration > 0 else voice.get_audio_duration(sub_maker)
+        )
+        audio_duration = (
+            measured_duration
+            if getattr(params, "video_source", "") == "ai_cartoon"
+            else math.ceil(measured_duration)
         )
         if audio_duration == 0:
             _mark_task_failed(task_id, "audio", "generated audio duration is zero")
