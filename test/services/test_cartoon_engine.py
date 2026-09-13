@@ -198,3 +198,60 @@ def test_render_cartoon_material_writes_plan_storyboard_and_material(tmp_path):
     assert plan["lip_sync"] == "heuristic"
     assert plan["scenes"]
     assert (task_dir / "cartoon_storyboard.jpg").is_file()
+
+
+
+def test_audio_aware_heuristic_mouth_closes_between_cues():
+    cues = [cartoon_engine.MouthCue(0.0, 0.1, "A")]
+    assert cartoon_engine._mouth_at(cues, 0.05, True) == "A"
+    assert cartoon_engine._mouth_at(cues, 0.20, True) == "X"
+    assert cartoon_engine._mouth_at(cues, 0.05, False) == "X"
+
+
+def test_generate_heuristic_mouth_cues_uses_audio_activity():
+    expected = [
+        cartoon_engine.MouthCue(0.0, 0.09, "X"),
+        cartoon_engine.MouthCue(0.09, 0.18, "C"),
+    ]
+    with patch(
+        "app.services.cartoon_engine._heuristic_audio_mouth_cues",
+        return_value=expected,
+    ) as analyze:
+        cues, backend = cartoon_engine.generate_mouth_cues(
+            "C:/task/audio.mp3",
+            mode="heuristic",
+        )
+    assert backend == "heuristic"
+    assert cues == expected
+    analyze.assert_called_once_with("C:/task/audio.mp3")
+
+
+def test_non_graphic_semantic_overlay_renders_real_visual_card():
+    scene = cartoon_engine.CartoonScene(
+        scene=1,
+        start=0.0,
+        end=4.0,
+        narration="Keep the browser tab open.",
+        layout="host",
+        speaker="host",
+        emotion="thinking",
+        action="point",
+        overlay="browser_tabs",
+        overlay_text="OPEN TABS",
+    )
+    renderer = cartoon_engine.DoodleRenderer(
+        width=360,
+        height=640,
+        scenes=[scene],
+        mouth_cues=[],
+    )
+    frame = renderer.render(1.0)
+    upper = frame.crop((0, 0, 360, 290))
+    light_pixels = sum(
+        1
+        for red, green, blue in upper.getdata()
+        if red > 205 and green > 205 and blue > 205
+    )
+    # A real browser concept card occupies a substantial part of the upper frame;
+    # the old implementation only drew a shallow title strip.
+    assert light_pixels > 18000

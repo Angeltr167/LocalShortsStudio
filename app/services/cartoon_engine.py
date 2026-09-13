@@ -23,8 +23,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
+from array import array
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal
@@ -542,12 +544,103 @@ def _parse_rhubarb_payload(payload: dict[str, Any]) -> list[MouthCue]:
     return result
 
 
+def _heuristic_audio_mouth_cues(audio_file: str) -> list[MouthCue]:
+    """Build deterministic mouth activity from local narration amplitude.
+
+    This is intentionally not a phoneme recognizer. It prevents the fallback mouth
+    cycle from flapping through silence while keeping a lively mix of mouth shapes.
+    Rhubarb remains the higher-precision optional path.
+    """
+    ffmpeg = utils.get_ffmpeg_binary()
+    command = [
+        ffmpeg,
+        "-v",
+        "error",
+        "-i",
+        str(audio_file),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+        "s16le",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            timeout=180,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(f"heuristic lip-sync audio analysis unavailable: {exc}")
+        return []
+    if completed.returncode != 0 or not completed.stdout:
+        detail = completed.stderr.decode("utf-8", errors="replace")[-300:]
+        logger.warning(
+            "heuristic lip-sync audio analysis failed"
+            + (f": {detail}" if detail else "")
+        )
+        return []
+
+    samples = array("h")
+    samples.frombytes(completed.stdout)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    if not samples:
+        return []
+
+    sample_rate = 16000
+    window_samples = int(sample_rate * 0.09)
+    energies: list[float] = []
+    bounds: list[tuple[int, int]] = []
+    for start in range(0, len(samples), window_samples):
+        end = min(len(samples), start + window_samples)
+        if end <= start:
+            continue
+        total = 0.0
+        for sample in samples[start:end]:
+            total += float(sample) * float(sample)
+        rms = math.sqrt(total / (end - start)) / 32768.0
+        energies.append(rms)
+        bounds.append((start, end))
+    if not energies:
+        return []
+
+    ordered = sorted(energies)
+
+    def percentile(fraction: float) -> float:
+        index = int(round((len(ordered) - 1) * fraction))
+        return ordered[max(0, min(len(ordered) - 1, index))]
+
+    noise_floor = percentile(0.20)
+    speech_level = max(percentile(0.82), noise_floor + 1e-6)
+    threshold = max(0.0055, noise_floor * 1.9, speech_level * 0.16)
+    shape_cycle = "ACBEDFGH"
+    cues: list[MouthCue] = []
+    for index, (energy, (start, end)) in enumerate(zip(energies, bounds)):
+        start_t = start / sample_rate
+        end_t = end / sample_rate
+        if energy <= threshold:
+            shape = "X"
+        else:
+            strength = min(
+                1.0,
+                max(0.0, (energy - threshold) / max(1e-6, speech_level - threshold)),
+            )
+            offset = 2 if strength > 0.72 else (1 if strength > 0.38 else 0)
+            shape = shape_cycle[(index + offset) % len(shape_cycle)]
+        cues.append(MouthCue(start_t, end_t, shape))
+    return cues
+
+
 def generate_mouth_cues(
     audio_file: str,
     mode: Literal["auto", "rhubarb", "heuristic"] = "auto",
 ) -> tuple[list[MouthCue], str]:
     if mode == "heuristic":
-        return [], "heuristic"
+        return _heuristic_audio_mouth_cues(audio_file), "heuristic"
     binary = _resolve_rhubarb_binary()
     if not binary:
         if mode == "rhubarb":
@@ -555,7 +648,7 @@ def generate_mouth_cues(
                 "Rhubarb lip sync was requested but no rhubarb binary was found. "
                 "Set app.rhubarb_path, RHUBARB_PATH, or place it under tools/rhubarb/."
             )
-        return [], "heuristic"
+        return _heuristic_audio_mouth_cues(audio_file), "heuristic"
     with tempfile.TemporaryDirectory(prefix="mpt-rhubarb-") as temp_dir:
         output = Path(temp_dir) / "mouth.json"
         command = [binary, "-f", "json", "-o", str(output), str(audio_file)]
@@ -571,21 +664,23 @@ def generate_mouth_cues(
             if mode == "rhubarb":
                 raise CartoonRenderError(f"Rhubarb lip sync failed: {exc}") from exc
             logger.warning(f"Rhubarb unavailable; falling back to heuristic lip sync: {exc}")
-            return [], "heuristic"
+            return _heuristic_audio_mouth_cues(audio_file), "heuristic"
         if completed.returncode != 0 or not output.is_file():
             detail = (completed.stderr or completed.stdout or "rhubarb failed")[-500:]
             if mode == "rhubarb":
                 raise CartoonRenderError(detail)
             logger.warning(f"Rhubarb failed; falling back to heuristic lip sync: {detail}")
-            return [], "heuristic"
+            return _heuristic_audio_mouth_cues(audio_file), "heuristic"
         try:
             payload = json.loads(output.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             if mode == "rhubarb":
                 raise CartoonRenderError(f"invalid Rhubarb output: {exc}") from exc
-            return [], "heuristic"
+            return _heuristic_audio_mouth_cues(audio_file), "heuristic"
         cues = _parse_rhubarb_payload(payload)
-        return (cues, "rhubarb") if cues else ([], "heuristic")
+        if cues:
+            return cues, "rhubarb"
+        return _heuristic_audio_mouth_cues(audio_file), "heuristic"
 
 
 def _mouth_at(cues: list[MouthCue], t: float, speaking: bool) -> str:
@@ -594,6 +689,10 @@ def _mouth_at(cues: list[MouthCue], t: float, speaking: bool) -> str:
     for cue in cues:
         if cue.start <= t < cue.end:
             return cue.value
+    if cues:
+        # Audio-derived cues explicitly encode quiet windows. When no cue covers this
+        # timestamp, close the mouth instead of reviving the time-only fallback cycle.
+        return "X"
     # Fast deterministic fallback. It is intentionally irregular rather than a simple
     # open/closed toggle, which makes narration feel substantially less robotic.
     sequence = "ACDEBFAGDC"
@@ -818,8 +917,12 @@ class DoodleRenderer:
         scale: float = 1.0,
         dimmed: bool = False,
     ) -> None:
-        bob = self.sy(math.sin(t * 4.2 + (0.8 if facing < 0 else 0)) * 4)
-        y = base_y + bob
+        identity_host = color == self.palette.host
+        phase = 0.0 if identity_host else 0.85
+        bob = self.sy(math.sin(t * 3.4 + phase) * 6)
+        entrance = _ease_out_cubic(min(1.0, local_progress * 8.0))
+        nod = self.sy(math.sin(t * 2.1 + phase) * 2.5)
+        y = base_y + bob + nod + self.sy((1.0 - entrance) * 28)
         outline = self.palette.ink
         alpha_color = color
         if dimmed:
@@ -829,19 +932,92 @@ class DoodleRenderer:
         body_w = self.sx(230 * scale)
         body_h = self.sy(330 * scale)
         head_r = self.sx(125 * scale)
-        draw.ellipse(
+        draw.rounded_rectangle(
             (x - body_w / 2, y, x + body_w / 2, y + body_h),
+            radius=max(self.sc(28), self.sc(82 * scale)),
             fill=alpha_color,
             outline=outline,
             width=self.sc(9 * scale),
         )
+        # Stable clothing details make the recurring host/guest read as characters
+        # rather than interchangeable colored blobs.
+        collar_y = y + self.sy(48 * scale)
+        draw.polygon(
+            (
+                (x - self.sx(58 * scale), collar_y),
+                (x, collar_y + self.sy(52 * scale)),
+                (x + self.sx(58 * scale), collar_y),
+                (x, collar_y + self.sy(108 * scale)),
+            ),
+            fill=shadow,
+        )
+        badge_x = x - self.sx(62 * scale) if identity_host else x + self.sx(62 * scale)
+        draw.ellipse(
+            (
+                badge_x - self.sx(14 * scale),
+                y + self.sy(155 * scale),
+                badge_x + self.sx(14 * scale),
+                y + self.sy(183 * scale),
+            ),
+            fill=self.palette.accent if identity_host else self.palette.cyan,
+            outline=outline,
+            width=max(1, self.sc(3 * scale)),
+        )
         head_y = y - self.sy(105 * scale)
+        # Ears sit behind the face and help the head feel constructed rather than stamped.
+        ear_r = self.sx(23 * scale)
+        for ear_x in (x - head_r, x + head_r):
+            draw.ellipse(
+                (
+                    ear_x - ear_r,
+                    head_y - ear_r * 0.15,
+                    ear_x + ear_r,
+                    head_y + ear_r * 1.85,
+                ),
+                fill=shadow,
+                outline=outline,
+                width=max(1, self.sc(5 * scale)),
+            )
         draw.ellipse(
             (x - head_r, head_y - head_r, x + head_r, head_y + head_r),
             fill=color,
             outline=outline,
             width=self.sc(9 * scale),
         )
+        # Distinct silhouettes: the host has a three-point quiff, the guest a side sweep.
+        hair_fill = "#342A38" if identity_host else "#302E55"
+        if identity_host:
+            draw.polygon(
+                (
+                    (x - self.sx(72 * scale), head_y - self.sy(102 * scale)),
+                    (x - self.sx(28 * scale), head_y - self.sy(145 * scale)),
+                    (x + self.sx(2 * scale), head_y - self.sy(106 * scale)),
+                    (x + self.sx(42 * scale), head_y - self.sy(142 * scale)),
+                    (x + self.sx(78 * scale), head_y - self.sy(98 * scale)),
+                ),
+                fill=hair_fill,
+            )
+        else:
+            draw.pieslice(
+                (
+                    x - self.sx(108 * scale),
+                    head_y - self.sy(128 * scale),
+                    x + self.sx(108 * scale),
+                    head_y + self.sy(18 * scale),
+                ),
+                188,
+                352,
+                fill=hair_fill,
+            )
+            draw.ellipse(
+                (
+                    x + self.sx(68 * scale),
+                    head_y - self.sy(62 * scale),
+                    x + self.sx(113 * scale),
+                    head_y + self.sy(22 * scale),
+                ),
+                fill=hair_fill,
+            )
         # Small asymmetric cheek patch gives the characters an authored, non-template feel.
         draw.ellipse(
             (
@@ -866,9 +1042,28 @@ class DoodleRenderer:
                     width=self.sc(5 * scale),
                 )
         else:
+            pupil_shift = facing * self.sc(2 * scale)
             for eye_x in (x - eye_gap, x + eye_gap):
+                white_r = self.sc(13 * scale)
                 draw.ellipse(
-                    (eye_x - eye_r, eye_y - eye_r, eye_x + eye_r, eye_y + eye_r),
+                    (
+                        eye_x - white_r,
+                        eye_y - white_r,
+                        eye_x + white_r,
+                        eye_y + white_r,
+                    ),
+                    fill="#F8F5F0",
+                    outline=outline,
+                    width=max(1, self.sc(3 * scale)),
+                )
+                pupil_r = self.sc(6 * scale)
+                draw.ellipse(
+                    (
+                        eye_x + pupil_shift - pupil_r,
+                        eye_y - pupil_r,
+                        eye_x + pupil_shift + pupil_r,
+                        eye_y + pupil_r,
+                    ),
                     fill=outline,
                 )
 
@@ -886,11 +1081,27 @@ class DoodleRenderer:
             for eye_x in (x - eye_gap, x + eye_gap):
                 draw.line((eye_x - eye_r, brow_y, eye_x + eye_r, brow_y), fill=outline, width=self.sc(4 * scale))
 
+        # Tiny nose mark keeps expressions readable at vertical-video scale.
+        nose_x = x + facing * self.sx(8 * scale)
+        draw.arc(
+            (
+                nose_x - self.sx(12 * scale),
+                head_y + self.sy(10 * scale),
+                nose_x + self.sx(16 * scale),
+                head_y + self.sy(42 * scale),
+            ),
+            20 if facing > 0 else 160,
+            205 if facing > 0 else 345,
+            fill=shadow,
+            width=max(1, self.sc(4 * scale)),
+        )
         self._mouth(draw, x, head_y + self.sy(62 * scale), mouth, scale)
 
         shoulder_y = y + self.sy(105 * scale)
         arm_length = self.sx(150 * scale)
-        gesture = _ease_out_cubic(min(1.0, local_progress * 3.0))
+        gesture_base = _ease_out_cubic(min(1.0, local_progress * 3.0))
+        emphasis = 0.5 + 0.5 * math.sin(t * 2.8 + phase)
+        gesture = min(1.0, gesture_base * (0.84 + 0.16 * emphasis))
         left_shoulder = (x - self.sx(87 * scale), shoulder_y)
         right_shoulder = (x + self.sx(87 * scale), shoulder_y)
         if action in {"point", "explain"}:
@@ -913,6 +1124,34 @@ class DoodleRenderer:
             start = right_shoulder if facing > 0 else left_shoulder
             draw.line((start[0], start[1], hand_x, hand_y), fill=outline, width=self.sc(13 * scale))
             draw.line((hand_x, hand_y, hand_x + facing * self.sx(55 * scale), hand_y - self.sy(25 * scale)), fill=self.palette.accent, width=self.sc(7 * scale))
+        elif action == "react":
+            lift = self.sy((24 + 22 * emphasis) * scale)
+            hand_x = x + facing * self.sx(118 * scale)
+            hand_y = shoulder_y - lift
+            start = right_shoulder if facing > 0 else left_shoulder
+            draw.line((start[0], start[1], hand_x, hand_y), fill=outline, width=self.sc(12 * scale))
+            draw.ellipse(
+                (
+                    hand_x - self.sc(13 * scale),
+                    hand_y - self.sc(13 * scale),
+                    hand_x + self.sc(13 * scale),
+                    hand_y + self.sc(13 * scale),
+                ),
+                fill=color,
+                outline=outline,
+                width=max(1, self.sc(4 * scale)),
+            )
+            other = left_shoulder if facing > 0 else right_shoulder
+            draw.line(
+                (
+                    other[0],
+                    other[1],
+                    other[0] - facing * self.sx(38 * scale),
+                    other[1] + self.sy(115 * scale),
+                ),
+                fill=outline,
+                width=self.sc(12 * scale),
+            )
         else:
             draw.line((left_shoulder[0], left_shoulder[1], left_shoulder[0] - self.sx(40 * scale), left_shoulder[1] + self.sy(120 * scale)), fill=outline, width=self.sc(12 * scale))
             draw.line((right_shoulder[0], right_shoulder[1], right_shoulder[0] + self.sx(40 * scale), right_shoulder[1] + self.sy(120 * scale)), fill=outline, width=self.sc(12 * scale))
@@ -1071,6 +1310,37 @@ class DoodleRenderer:
             _text_centered(draw, (cx, y), line, title_font, ink)
             y += self.sy(90)
 
+    def _compact_overlay(
+        self,
+        image: Image.Image,
+        scene: CartoonScene,
+        progress: float,
+        t: float,
+    ) -> None:
+        """Reuse the full explanatory graphic as a picture-in-picture concept card."""
+        if scene.overlay == "none":
+            return
+        layer = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
+        self._overlay(ImageDraw.Draw(layer), scene, progress, t)
+        source = (
+            self.sx(85),
+            self.sy(285),
+            self.sx(995),
+            self.sy(1215),
+        )
+        card = layer.crop(source)
+        max_width = self.sx(820)
+        max_height = self.sy(600)
+        factor = min(max_width / card.width, max_height / card.height)
+        size = (
+            max(1, int(round(card.width * factor))),
+            max(1, int(round(card.height * factor))),
+        )
+        card = card.resize(size, Image.Resampling.LANCZOS)
+        left = (self.width - card.width) // 2
+        top = self.sy(62)
+        image.paste(card, (left, top), card)
+
     def render(self, t: float) -> Image.Image:
         scene = _scene_for_time(self.scenes, t)
         local = max(0.0, min(scene.duration, t - scene.start))
@@ -1106,12 +1376,25 @@ class DoodleRenderer:
             return image
 
         if scene.layout == "two_shot":
-            self._microphone(draw, self.sx(390), self.sy(1180), flip=False)
-            self._microphone(draw, self.sx(690), self.sy(1180), flip=True)
+            has_overlay = scene.overlay != "none"
+            pair_base_y = self.sy(1040 if has_overlay else 980)
+            pair_scale = 0.84 if has_overlay else 0.95
+            self._microphone(
+                draw,
+                self.sx(390),
+                self.sy(1215 if has_overlay else 1180),
+                flip=False,
+            )
+            self._microphone(
+                draw,
+                self.sx(690),
+                self.sy(1215 if has_overlay else 1180),
+                flip=True,
+            )
             self._character(
                 draw,
                 x=self.sx(285),
-                base_y=self.sy(980),
+                base_y=pair_base_y,
                 color=self.palette.host,
                 shadow=self.palette.host_shadow,
                 emotion=scene.emotion if speaking_host else "neutral",
@@ -1120,13 +1403,13 @@ class DoodleRenderer:
                 facing=1,
                 t=t,
                 local_progress=progress,
-                scale=0.95,
+                scale=pair_scale,
                 dimmed=not speaking_host,
             )
             self._character(
                 draw,
                 x=self.sx(795),
-                base_y=self.sy(980),
+                base_y=pair_base_y,
                 color=self.palette.guest,
                 shadow=self.palette.guest_shadow,
                 emotion=scene.emotion if not speaking_host else "neutral",
@@ -1135,7 +1418,7 @@ class DoodleRenderer:
                 facing=-1,
                 t=t,
                 local_progress=progress,
-                scale=0.95,
+                scale=pair_scale,
                 dimmed=speaking_host,
             )
         else:
@@ -1143,11 +1426,19 @@ class DoodleRenderer:
             color = self.palette.host if host_layout else self.palette.guest
             shadow = self.palette.host_shadow if host_layout else self.palette.guest_shadow
             facing = 1 if host_layout else -1
-            self._microphone(draw, self.sx(660 if host_layout else 420), self.sy(1085), flip=not host_layout)
+            has_overlay = scene.overlay != "none"
+            presenter_base_y = self.sy(1040 if has_overlay else 860)
+            presenter_scale = 0.96 if has_overlay else 1.26
+            self._microphone(
+                draw,
+                self.sx(660 if host_layout else 420),
+                self.sy(1210 if has_overlay else 1085),
+                flip=not host_layout,
+            )
             self._character(
                 draw,
                 x=self.sx(470 if host_layout else 610),
-                base_y=self.sy(860),
+                base_y=presenter_base_y,
                 color=color,
                 shadow=shadow,
                 emotion=scene.emotion,
@@ -1156,25 +1447,13 @@ class DoodleRenderer:
                 facing=facing,
                 t=t,
                 local_progress=progress,
-                scale=1.26,
+                scale=presenter_scale,
             )
 
-        # Non-graphic shots can still carry a compact explanatory card in the upper area.
+        # Presenter and two-shot layouts keep the recurring cast prominent while the
+        # actual semantic visual (browser, email, checklist, brain, etc.) appears above.
         if scene.overlay != "none":
-            card_progress = _ease_out_cubic(min(1.0, progress * 4.0))
-            card_w = self.sx(720 * card_progress)
-            card_h = self.sy(210)
-            cx = self.width // 2
-            top = self.sy(100)
-            if card_w > self.sx(30):
-                draw.rounded_rectangle((cx - card_w / 2, top, cx + card_w / 2, top + card_h), radius=self.sc(40), fill=self.palette.card, outline=self.palette.ink, width=self.sc(7))
-                if card_w > self.sx(420):
-                    lines = _wrap_lines(scene.overlay_text or scene.accent_text, width=24, max_lines=2)
-                    font = _font(self.sc(44))
-                    y = top + self.sy(42)
-                    for line in lines:
-                        _text_centered(draw, (cx, y), line, font, self.palette.card_ink)
-                        y += self.sy(58)
+            self._compact_overlay(image, scene, progress, t)
         return image
 
 

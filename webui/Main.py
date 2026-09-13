@@ -4564,25 +4564,38 @@ def _render_video_settings(panel, params):
             # “随机拼接”，同时保留用户原选择，关闭后自动恢复。
             sync_script_order_concat_mode()
             if params.video_source == "ai_cartoon":
-                st.session_state["video_concat_mode_select"] = VideoConcatMode.sequential.value
-            selected_concat_mode = stable_selectbox(
-                tr("Video Concat Mode"),
-                options=[value for _, value in video_concat_modes],
-                default_value=_saved_ui_choice(
-                    "video_concat_mode",
-                    [value for _, value in video_concat_modes],
-                    VideoConcatMode.random.value,
-                ),
-                key="video_concat_mode_select",
-                format_func=lambda value: dict(
-                    (v, label) for label, v in video_concat_modes
-                )[value],
-                disabled=bool(
-                    st.session_state.get("match_materials_to_script", False)
-                    or st.session_state.get("strict_scene_matching", False)
-                    or params.video_source == "ai_cartoon"
-                ),
-            )
+                # Use a dedicated widget key and a one-option list. Reusing the normal
+                # selectbox key can resurrect a persisted "random" value on Streamlit
+                # reruns even while the control is disabled.
+                selected_concat_mode = st.selectbox(
+                    tr("Video Concat Mode"),
+                    options=[VideoConcatMode.sequential.value],
+                    index=0,
+                    key="video_concat_mode_cartoon_locked",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in video_concat_modes
+                    )[value],
+                    disabled=True,
+                    help="AI Cartoon uses one authored narration timeline in sequential order.",
+                )
+            else:
+                selected_concat_mode = stable_selectbox(
+                    tr("Video Concat Mode"),
+                    options=[value for _, value in video_concat_modes],
+                    default_value=_saved_ui_choice(
+                        "video_concat_mode",
+                        [value for _, value in video_concat_modes],
+                        VideoConcatMode.random.value,
+                    ),
+                    key="video_concat_mode_select",
+                    format_func=lambda value: dict(
+                        (v, label) for label, v in video_concat_modes
+                    )[value],
+                    disabled=bool(
+                        st.session_state.get("match_materials_to_script", False)
+                        or st.session_state.get("strict_scene_matching", False)
+                    ),
+                )
             params.video_concat_mode = VideoConcatMode(selected_concat_mode)
 
             strict_scene_supported = (
@@ -6860,6 +6873,7 @@ def _render_generation_controls(
             "metaso_minimax",
             "loomloom",
             "openai_image",
+            "ai_cartoon",
             "local",
         ]:
             _remove_active_generation_task(task_id)
