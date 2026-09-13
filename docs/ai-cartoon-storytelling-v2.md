@@ -155,7 +155,27 @@ The material (1080x1920, 24 fps, 21.375 s) and final (1080x1920, 30 fps,
 show tab population/highlighting and the release transition; all required
 plan, storyboard, material and final artifacts are present.
 
-6. Staging and subtitle safe zones, cartoon-only adaptation.
+## Phase 6 — visual and subtitle polish (verified)
+
+Cartoon subtitles now use a deterministic reserved band whenever the source is
+`ai_cartoon`. Bottom, two-thirds and custom positions are clamped against the
+band for portrait, square and landscape canvases; explicit top/center choices
+and all non-cartoon sources retain their existing behavior. The clamp covers
+long sentence captions and word-by-word cues, including background-disabled
+subtitles, without allowing negative or off-canvas positions.
+
+Safe-zone tests cover all three aspect ratios, long captions, both display
+modes, explicit positions and legacy stock anchoring. The focused video/cartoon
+tests passed with 62 tests and 56 subtests; compile and Ruff passed. The full
+suite passed with 1120 passed, 11 skipped and 8558 subtests passed.
+
+Real fallback render: `storage/tasks/cartoon-v2-phase6-fallback-caf0215f`.
+The final 1080x1920/30 fps video (21.366667 s video plus 21.340 s audio) and
+material decode cleanly. Long and payoff captions were inspected between the
+upper graphic and character heads; all plan, storyboard, material and final
+artifacts are present.
+
+7. Audio-aware mouth smoothing and final acting; fresh Chatterbox/Ollama E2E.
 7. Audio-aware mouth smoothing and final acting; fresh Chatterbox/Ollama E2E.
 
 Final acceptance also requires a second semantic scenario, deterministic

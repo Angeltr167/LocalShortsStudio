@@ -1130,6 +1130,56 @@ def subtitle_font_supports_text(font_path: str, text: str) -> bool:
     return _subtitle_font_supports_sample(font_path, sample)
 
 
+# Cartoon scenes reserve the lower character band for acting.  Long captions
+# used to grow upward into faces because the generic bottom anchor only knew
+# about the canvas edge.  Keep this layout deterministic and scoped to the
+# cartoon source so stock and user-selected subtitle positions remain intact.
+_CARTOON_SUBTITLE_SAFE_BOTTOM_RATIOS = {
+    VideoAspect.portrait: 0.49,
+    VideoAspect.square: 0.64,
+    VideoAspect.landscape: 0.76,
+}
+
+
+def _subtitle_y_for_layout(
+    params: VideoParams,
+    video_width: int,
+    video_height: int,
+    clip_height: int,
+) -> float | str:
+    """Resolve a subtitle y position while preserving explicit layout choices."""
+    position = getattr(params, "subtitle_position", "bottom")
+    if position == "center":
+        return "center"
+
+    if position == "bottom":
+        desired_y = video_height * 0.95 - clip_height
+    elif position in ("two_thirds_bottom", "two_thirds", "2/3_bottom"):
+        desired_y = (video_height - clip_height) / 3.0
+    elif position == "custom":
+        custom_position = float(getattr(params, "custom_position", 70.0))
+        desired_y = (video_height - clip_height) * (custom_position / 100.0)
+    else:
+        # The caller handles top and legacy unknown values separately.
+        return position
+
+    if getattr(params, "video_source", "") != "ai_cartoon":
+        if position == "custom":
+            margin = 10.0
+            return max(margin, min(desired_y, video_height - clip_height - margin))
+        return desired_y
+
+    try:
+        aspect = VideoAspect(params.video_aspect)
+    except (TypeError, ValueError):
+        aspect = VideoAspect.portrait
+    safe_bottom = video_height * _CARTOON_SUBTITLE_SAFE_BOTTOM_RATIOS[aspect]
+    # Keep the whole caption inside the reserved band.  A very tall caption
+    # still receives a bounded position instead of a negative MoviePy offset.
+    safe_margin = max(10.0, video_height * 0.025)
+    return max(safe_margin, min(desired_y, safe_bottom - clip_height))
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -1325,24 +1375,18 @@ def generate_video(
         if anim_type in ("pop_spring", "spring", "pop"):
             _clip = _apply_subtitle_spring_animation(_clip, duration)
 
-        if params.subtitle_position == "bottom":
-            _clip = _clip.with_position(("center", video_height * 0.95 - _clip.h))
+        if params.subtitle_position in {
+            "bottom",
+            "two_thirds_bottom",
+            "two_thirds",
+            "2/3_bottom",
+            "custom",
+        }:
+            _clip = _clip.with_position(
+                ("center", _subtitle_y_for_layout(params, video_width, video_height, _clip.h))
+            )
         elif params.subtitle_position == "top":
             _clip = _clip.with_position(("center", video_height * 0.05))
-        elif params.subtitle_position in ("two_thirds_bottom", "two_thirds", "2/3_bottom"):
-            # 2/3 from the bottom = 1/3 from the top: y = (video_height - _clip.h) * (1/3)
-            y_two_thirds = (video_height - _clip.h) / 3.0
-            _clip = _clip.with_position(("center", y_two_thirds))
-        elif params.subtitle_position == "custom":
-            # Ensure the subtitle is fully within the screen bounds
-            margin = 10  # Additional margin, in pixels
-            max_y = video_height - _clip.h - margin
-            min_y = margin
-            custom_y = (video_height - _clip.h) * (params.custom_position / 100)
-            custom_y = max(
-                min_y, min(custom_y, max_y)
-            )  # Constrain the y value within the valid range
-            _clip = _clip.with_position(("center", custom_y))
         else:  # center
             _clip = _clip.with_position(("center", "center"))
         return _clip
