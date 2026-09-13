@@ -77,6 +77,8 @@ _OVERLAYS = frozenset(
     }
 )
 _MOUTH_SHAPES = frozenset("XABCDEFGH")
+_MIN_MOUTH_CUE_SECONDS = 0.045
+_MOUTH_CUE_JOIN_TOLERANCE_SECONDS = 0.015
 
 
 @dataclass(frozen=True)
@@ -632,7 +634,46 @@ def _parse_rhubarb_payload(payload: dict[str, Any]) -> list[MouthCue]:
             value = "X"
         if end > start:
             result.append(MouthCue(start, end, value))
-    return result
+    return _smooth_mouth_cues(result)
+
+
+def _smooth_mouth_cues(cues: list[MouthCue]) -> list[MouthCue]:
+    """Normalize cue order and coalesce adjacent identical mouth shapes.
+
+    Rhubarb can emit very short corrective cues around consonants; dropping only
+    sub-frame noise and joining near-contiguous identical shapes keeps those
+    transitions readable without inventing phonemes or changing the audio timing.
+    """
+    ordered = sorted(cues, key=lambda cue: (cue.start, cue.end))
+    smoothed: list[MouthCue] = []
+    for cue in ordered:
+        try:
+            start = float(cue.start)
+            end = float(cue.end)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+            continue
+        value = str(cue.value or "X").upper()
+        if value not in _MOUTH_SHAPES:
+            value = "X"
+        if end - start < _MIN_MOUTH_CUE_SECONDS:
+            continue
+        normalized = MouthCue(start, end, value)
+        if smoothed:
+            previous = smoothed[-1]
+            if (
+                previous.value == normalized.value
+                and normalized.start <= previous.end + _MOUTH_CUE_JOIN_TOLERANCE_SECONDS
+            ):
+                smoothed[-1] = MouthCue(
+                    previous.start,
+                    max(previous.end, normalized.end),
+                    previous.value,
+                )
+                continue
+        smoothed.append(normalized)
+    return smoothed
 
 
 def _heuristic_audio_mouth_cues(audio_file: str) -> list[MouthCue]:
@@ -683,7 +724,9 @@ def _heuristic_audio_mouth_cues(audio_file: str) -> list[MouthCue]:
         return []
 
     sample_rate = 16000
-    window_samples = int(sample_rate * 0.09)
+    # 120 ms gives the heuristic enough time to show a shape before changing,
+    # while still tracking ordinary syllable rhythm on short-form narration.
+    window_samples = int(sample_rate * 0.12)
     energies: list[float] = []
     bounds: list[tuple[int, int]] = []
     for start in range(0, len(samples), window_samples):
@@ -723,7 +766,7 @@ def _heuristic_audio_mouth_cues(audio_file: str) -> list[MouthCue]:
             offset = 2 if strength > 0.72 else (1 if strength > 0.38 else 0)
             shape = shape_cycle[(index + offset) % len(shape_cycle)]
         cues.append(MouthCue(start_t, end_t, shape))
-    return cues
+    return _smooth_mouth_cues(cues)
 
 
 def generate_mouth_cues(
@@ -1142,7 +1185,10 @@ class DoodleRenderer:
                     width=self.sc(5 * scale),
                 )
         else:
-            pupil_shift = facing * self.sc(2 * scale)
+            # A restrained deterministic gaze drift prevents frozen pupils while
+            # preserving the stable identity and staging of each character.
+            gaze = math.sin(t * 0.72 + phase) * self.sc(3 * scale)
+            pupil_shift = facing * self.sc(2 * scale) + int(round(gaze))
             for eye_x in (x - eye_gap, x + eye_gap):
                 white_r = self.sc(13 * scale)
                 draw.ellipse(

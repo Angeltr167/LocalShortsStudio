@@ -175,8 +175,33 @@ material decode cleanly. Long and payoff captions were inspected between the
 upper graphic and character heads; all plan, storyboard, material and final
 artifacts are present.
 
-7. Audio-aware mouth smoothing and final acting; fresh Chatterbox/Ollama E2E.
-7. Audio-aware mouth smoothing and final acting; fresh Chatterbox/Ollama E2E.
+## Phase 7 — lip sync and final acting polish (verified)
+
+Mouth cues are now sorted, validated and coalesced deterministically; sub-frame
+noise is discarded without inventing phonemes. The heuristic analyzer uses
+120 ms windows to reduce flapping while retaining audio-aware quiet windows,
+and Rhubarb remains optional with the same deterministic heuristic fallback.
+When analysis is unavailable the existing bounded mouth-cycle fallback keeps
+renders reproducible. Character acting retains deterministic bob/nod and blink
+timing with a restrained gaze drift, while narration mouth ownership remains
+host-only under the single-voice convention.
+
+Lip-sync tests cover smoothing, parser ordering, unavailable-audio fallback and
+speaker gating. The focused cartoon suite passed with 28 tests; compile and
+Ruff passed. The full suite passed with 1123 passed, 11 skipped and 8558
+subtests passed.
+
+Fresh E2E with Chatterbox and Ollama: `storage/tasks/cartoon-v2-phase7-e2e-24b99572`.
+Chatterbox generated new `default-Female` narration (22.140 s), Ollama chose
+the bounded AI plan, and the compositor produced a 1080x1920/30 fps final with
+22.166667 s video. Material and final MP4s decode cleanly; the plan has eight
+contiguous beats, the `pending_item_1` marker persists through parked/released
+states, and the storyboard plus final frames were inspected for roles, gaze,
+mouth activity and subtitle safe zones.
+
+The final verification also reruns deterministic fallback on the reference
+audio and checks the complete timeline, artifacts and compositor output before
+the release commit.
 
 Final acceptance also requires a second semantic scenario, deterministic
 fallback, full timeline/compositor preservation and muted/no-subtitle review.
